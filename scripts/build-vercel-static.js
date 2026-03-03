@@ -2,12 +2,18 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
 
 const appDir = path.resolve(__dirname, "..");
-const repoRoot = path.resolve(appDir, "..", "..");
 const distDir = path.join(appDir, "dist");
 const webDir = path.join(appDir, "web");
+
+const REQUIRED_STATIC_ASSETS = [
+  path.join(webDir, "data", "trait_db.json"),
+  path.join(webDir, "data", "punks-atlas.png"),
+  path.join(webDir, "fonts", "GeistMono-Regular.otf"),
+  path.join(webDir, "fonts", "GeistMono-Medium.otf"),
+  path.join(webDir, "fonts", "GeistMono-Bold.otf"),
+];
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -31,13 +37,22 @@ function copyDirContents(srcDir, destDir) {
   }
 }
 
+function assertBundledStaticAssets() {
+  const missing = REQUIRED_STATIC_ASSETS.filter((filePath) => !fs.existsSync(filePath));
+  if (!missing.length) {
+    return;
+  }
+  const rel = missing.map((filePath) => path.relative(appDir, filePath)).join(", ");
+  throw new Error(
+    `[No-Studio] Missing bundled static assets: ${rel}. ` +
+    "This repo now expects the Vercel build to be self-contained. Commit the web/data and web/fonts assets before deploying.",
+  );
+}
+
 function main() {
   fs.rmSync(distDir, { recursive: true, force: true });
   ensureDir(distDir);
-
-  execFileSync("python3", [path.join(appDir, "scripts", "build-punk-atlas.py")], {
-    stdio: "ignore",
-  });
+  assertBundledStaticAssets();
 
   copyDirContents(webDir, distDir);
 
@@ -55,10 +70,6 @@ function main() {
   for (const routePath of routeAliases) {
     copyFile(indexSrc, path.join(distDir, routePath, "index.html"));
   }
-
-  copyDirContents(path.join(repoRoot, "assets", "fonts"), path.join(distDir, "fonts"));
-  copyFile(path.join(repoRoot, "scripts", "trait_db.json"), path.join(distDir, "data", "trait_db.json"));
-  copyFile(path.join(appDir, "static", "punks-atlas.png"), path.join(distDir, "data", "punks-atlas.png"));
 
   console.log("[No-Studio] Static build complete:", distDir);
 }
