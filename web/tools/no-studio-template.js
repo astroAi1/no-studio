@@ -42,12 +42,12 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
           <span class="topbar-brand-note">Original source. Studio-grade casts.</span>
         </div>
         <div class="topbar-sep"></div>
-        <div class="topbar-group">
+        <div class="topbar-group topbar-group--grid">
           <span class="topbar-label">Grid</span>
           ${subdivBtns}
         </div>
         <div class="topbar-sep"></div>
-        <div class="topbar-group">
+        <div class="topbar-group topbar-group--history">
           <button class="topbar-btn" data-role="undo-btn" disabled>Undo</button>
           <button class="topbar-btn" data-role="redo-btn" disabled>Redo</button>
         </div>
@@ -81,6 +81,10 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
           </div>
         </div>
       </div>
+
+      <button class="mobile-dock-toggle" type="button" data-role="mobile-dock-toggle" aria-expanded="false">
+        Open Studio Deck
+      </button>
 
       <div class="studio-dock-scrim" data-role="dock-scrim" aria-hidden="true"></div>
 

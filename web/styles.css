@@ -338,6 +338,39 @@ html, body {
   margin-left: auto;
 }
 
+.mobile-dock-toggle {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 11;
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.015)),
+    rgba(7,7,7,.92);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.03),
+    0 18px 40px rgba(0,0,0,.38);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: transform 160ms var(--ease), opacity 160ms var(--ease), border-color 120ms var(--ease), background 120ms var(--ease);
+}
+
+.mobile-dock-toggle:hover {
+  border-color: rgba(255,255,255,.14);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.075), rgba(255,255,255,.02)),
+    rgba(10,10,10,.96);
+}
+
 .topbar-status-shell {
   display: flex;
   align-items: center;
@@ -1657,7 +1690,7 @@ html, body {
 
 @media (max-width: 900px) {
   .studio {
-    --topbar-height: 92px;
+    --topbar-height: 108px;
     grid-template-columns: 1fr;
     grid-template-rows: var(--topbar-height) 1fr;
     grid-template-areas:
@@ -1675,18 +1708,52 @@ html, body {
 
   .studio-topbar {
     min-height: var(--topbar-height);
-    padding: 10px 12px;
+    padding: 10px 12px 8px;
     gap: 8px;
     row-gap: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
   }
 
   .topbar-brandlock {
     min-width: auto;
     padding-right: 0;
+    grid-column: 1;
   }
 
   .topbar-brand {
     font-size: 18px;
+  }
+
+  .topbar-sep,
+  .topbar-spacer,
+  .topbar-group--history,
+  .topbar-status-shell,
+  .sidebar-toggle {
+    display: none;
+  }
+
+  .topbar-group--grid {
+    grid-column: 1 / -1;
+    order: 3;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .topbar-group--grid::-webkit-scrollbar {
+    display: none;
+  }
+
+  .topbar-group--grid .topbar-label {
+    flex: 0 0 auto;
+  }
+
+  .topbar-group--grid .topbar-btn {
+    flex: 0 0 auto;
   }
 
   .canvas-stage-shell {
@@ -1694,6 +1761,7 @@ html, body {
     height: 100%;
     gap: 10px;
     transform: none !important;
+    justify-content: flex-start;
   }
 
   .canvas-stage-head,
@@ -1703,7 +1771,8 @@ html, body {
   }
 
   .canvas-stage-surface {
-    width: min(100%, calc(100vh - 220px));
+    width: min(100%, calc(100vw - 24px));
+    max-width: min(100%, calc(100dvh - 240px));
     border-radius: 18px;
   }
 
@@ -1713,26 +1782,28 @@ html, body {
     display: none;
   }
 
-  .topbar-status-shell {
-    order: 3;
-    min-width: 0;
-    max-width: none;
-    width: 100%;
-    margin-right: 0;
-  }
-
   .studio-dock-scrim {
-    inset: 76px 0 0 0;
+    inset: var(--topbar-height) 0 0 0;
   }
 
   .studio-sidebar {
-    left: auto;
-    right: 12px;
-    bottom: 10px;
-    top: 88px;
-    width: min(92vw, 340px);
-    max-height: none;
-    border-radius: 22px;
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: 100%;
+    max-height: min(68dvh, 640px);
+    border-radius: 22px 22px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    padding: 12px 12px calc(16px + env(safe-area-inset-bottom));
+    transform: translateY(calc(100% + 12px));
+    opacity: 1;
+  }
+
+  .studio-sidebar.is-open {
+    transform: translateY(0);
   }
 
   .studio-hero-actions {
@@ -1741,6 +1812,49 @@ html, body {
 
   .studio.is-dock-open .canvas-stage-shell {
     transform: none;
+  }
+
+  .mobile-dock-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .studio.is-dock-open .mobile-dock-toggle {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%) translateY(10px);
+  }
+
+  .studio-canvas {
+    align-items: flex-start;
+    overflow: auto;
+    padding: 12px 12px 76px;
+  }
+
+  .canvas-stage-head {
+    padding: 0 4px;
+  }
+
+  .canvas-stage-foot {
+    padding: 0 2px;
+    gap: 8px;
+  }
+
+  .canvas-stage-chip {
+    min-height: 22px;
+    padding: 0 8px;
+    font-size: 10px;
+  }
+
+  .dock-dismiss {
+    min-width: 44px;
+    height: 32px;
+    padding: 0 10px;
+  }
+
+  .gallery-list {
+    max-height: none;
   }
 }
 

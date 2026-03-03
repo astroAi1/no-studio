@@ -206,6 +206,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     sidebarHero: q("sidebar-hero"),
     sidebar: q("sidebar"),
     sidebarToggle: q("sidebar-toggle"),
+    mobileDockToggle: q("mobile-dock-toggle"),
     dockDismiss: q("dock-dismiss"),
     sourceSection: q("source-section"),
     colorSection: q("color-section"),
@@ -357,6 +358,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.sidebarToggle.classList.toggle("is-active", isOpen);
     els.sidebarToggle.textContent = isOpen ? "Hide Studio Deck" : "Open Studio Deck";
     els.sidebarToggle.setAttribute("aria-expanded", String(isOpen));
+    if (els.mobileDockToggle) {
+      els.mobileDockToggle.classList.toggle("is-open", isOpen);
+      els.mobileDockToggle.textContent = isOpen ? "Close Studio Deck" : "Open Studio Deck";
+      els.mobileDockToggle.setAttribute("aria-expanded", String(isOpen));
+    }
     const dockWidth = isOpen ? Math.ceil(els.sidebar.getBoundingClientRect().width) + 28 : 0;
     const stageShift = isOpen ? Math.max(72, Math.min(140, Math.round(dockWidth * 0.28))) : 0;
     studioEl.style.setProperty("--dock-width-offset", `${dockWidth}px`);
@@ -2119,6 +2125,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   // ── Sidebar toggle / dock drawer ──────────────────────────────
 
   els.sidebarToggle?.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("is-open")));
+  els.mobileDockToggle?.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("is-open")));
   els.dockDismiss?.addEventListener("click", () => setSidebarOpen(false));
   els.dockScrim?.addEventListener("click", () => setSidebarOpen(false));
   mobileDockQuery.addEventListener("change", handleDockMediaChange);
