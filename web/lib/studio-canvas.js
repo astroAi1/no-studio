@@ -532,7 +532,10 @@ export class StudioCanvas {
     return new ImageData(new Uint8ClampedArray(this.buffer), SIZE, SIZE);
   }
 
-  exportPng1024() {
+  exportPng1024(options = {}) {
+    const grainOverride = Object.prototype.hasOwnProperty.call(options, "grain")
+      ? options.grain
+      : null;
     const temp = document.createElement("canvas");
     temp.width = 1024;
     temp.height = 1024;
@@ -542,12 +545,13 @@ export class StudioCanvas {
       tctx.fillStyle = "#040404";
       tctx.fillRect(0, 0, 1024, 1024);
       this._drawSheet(tctx, 0, 0, 1024);
+      this._drawGrain(tctx, 0, 0, 1024, grainOverride);
       return temp;
     }
     const imageData = this.exportImageData();
     this.offscreenCtx.putImageData(imageData, 0, 0);
     tctx.drawImage(this.offscreen, 0, 0, 1024, 1024);
-    this._drawGrain(tctx, 0, 0, 1024);
+    this._drawGrain(tctx, 0, 0, 1024, grainOverride);
     return temp;
   }
 
@@ -627,8 +631,9 @@ export class StudioCanvas {
     this._drawGrid(offsetX, offsetY, scaledSize);
   }
 
-  _drawGrain(targetCtx, offsetX, offsetY, scaledSize) {
-    if (!this.grain.enabled || this.grain.amount <= 0 || !this.loaded || scaledSize <= 0) return;
+  _drawGrain(targetCtx, offsetX, offsetY, scaledSize, grainOverride = null) {
+    const grain = grainOverride || this.grain;
+    if (!grain || !grain.enabled || grain.amount <= 0 || !this.loaded || scaledSize <= 0) return;
 
     const grainSize = Math.max(24, Math.round(scaledSize));
     const grainCanvas = document.createElement("canvas");
@@ -638,17 +643,17 @@ export class StudioCanvas {
     const image = grainCtx.createImageData(grainSize, grainSize);
     const data = image.data;
     const pixelScale = grainSize / SIZE;
-    const activeHex = this.grain.activeHex;
+    const activeHex = grain.activeHex;
 
     for (let gy = 0; gy < grainSize; gy += 1) {
       const sy = Math.min(SIZE - 1, Math.floor(gy / pixelScale));
       for (let gx = 0; gx < grainSize; gx += 1) {
         const sx = Math.min(SIZE - 1, Math.floor(gx / pixelScale));
-        if (!this._grainTargetMatches(sx, sy, activeHex)) continue;
+        if (!this._grainTargetMatches(sx, sy, grain.target, activeHex)) continue;
 
-        const n = noiseAtLocal(gx, gy, this.grain.seed, this.grain.target.length);
+        const n = noiseAtLocal(gx, gy, grain.seed, String(grain.target || "").length);
         const centered = (n - 0.5) * 2;
-        const intensity = Math.abs(centered) * (0.08 + (this.grain.amount * 0.22));
+        const intensity = Math.abs(centered) * (0.08 + (grain.amount * 0.22));
         if (intensity < 0.012) continue;
 
         const idx = (gy * grainSize + gx) * 4;
@@ -720,10 +725,10 @@ export class StudioCanvas {
     this.ctx.restore();
   }
 
-  _grainTargetMatches(x, y, activeHex) {
+  _grainTargetMatches(x, y, target, activeHex) {
     const occupied = this.isOccupied(x, y);
-    if (this.grain.target === "background") return !occupied;
-    if (this.grain.target === "figure") return occupied;
+    if (target === "background") return !occupied;
+    if (target === "figure") return occupied;
     if (!occupied || !activeHex) return false;
     return this.getPixelHex(x, y) === activeHex;
   }

@@ -25,6 +25,7 @@ import {
 import { deriveNoMinimalismPair, deriveRolePair } from "../lib/studio-signature.js";
 import { getStudioProgram, listStudioPrograms } from "../lib/studio-programs.js";
 import { exportCanvasPng } from "../lib/download.js";
+import { encodeIndexedGif, quantizeImageDataToRgb332 } from "../lib/gif-encode.js";
 
 function escapeHtml(v) {
   return String(v || "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
@@ -97,6 +98,19 @@ function randomInt(min, max) {
 function pickOne(list) {
   if (!Array.isArray(list) || !list.length) return null;
   return list[randomInt(0, list.length - 1)];
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  if (fileName) {
+    link.download = fileName;
+  }
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 function collapsePresetResult(classified, presetResult, totalTones) {
@@ -1982,7 +1996,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const ok = state.selected != null;
     const grain = canvas.getDisplayGrain();
     els.exportPng.disabled = !ok;
-    els.exportGif.disabled = !state.noiseGifAvailable || !ok || !grain.enabled || !(grain.amount > 0);
+    els.exportGif.disabled = !ok || !grain.enabled || !(grain.amount > 0);
     if (els.saveGallery) {
       els.saveGallery.disabled = !ok || state.gallerySaving;
     }
@@ -2000,6 +2014,37 @@ export function mountNoStudioTool(root, shellApi = {}) {
     link.remove();
   }
 
+  async function exportNoiseGifInBrowser() {
+    const grain = canvas.getDisplayGrain();
+    const frames = [];
+    const baseSeed = Math.max(0, Number(grain.seed) || 0);
+    const totalFrames = 12;
+    for (let i = 0; i < totalFrames; i += 1) {
+      const frameCanvas = canvas.exportPng1024({
+        grain: {
+          ...grain,
+          enabled: true,
+          seed: baseSeed + i,
+        },
+      });
+      const frameCtx = frameCanvas.getContext("2d", { willReadFrequently: true });
+      const frameImage = frameCtx.getImageData(0, 0, 1024, 1024);
+      frames.push(quantizeImageDataToRgb332(frameImage));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    const gifBytes = encodeIndexedGif({
+      width: 1024,
+      height: 1024,
+      frames,
+      delayMs: Math.round(1000 / totalFrames),
+      loop: 0,
+    });
+    return {
+      frames: totalFrames,
+      blob: new Blob([gifBytes], { type: "image/gif" }),
+    };
+  }
+
   els.exportPng.addEventListener("click", () => {
     if (!state.selected) return;
     exportCanvasPng(canvas.exportPng1024(), `nopunk-${state.selected.id}-no-studio.png`);
@@ -2007,10 +2052,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   els.exportGif.addEventListener("click", async () => {
     if (!state.selected) return;
-    if (!state.noiseGifAvailable) {
-      setTopbarStatus("Animated grain GIF export is local-server only");
-      return;
-    }
     const grain = canvas.getDisplayGrain();
     if (!grain.enabled || !(grain.amount > 0)) {
       setTopbarStatus("Animated GIF requires active grain");
@@ -2024,18 +2065,31 @@ export function mountNoStudioTool(root, shellApi = {}) {
     setTopbarStatus("Rendering animated grain GIF...");
 
     try {
-      const imageData = canvas.exportImageData();
-      const rgba24B64 = encodeRgba24B64(imageData.data);
-      const occupiedPixels = Array.from(state.originalOccupied || canvas.getOccupied());
-      const payload = await renderNoStudioNoiseGif({
-        tokenId: state.selected.id,
-        rgba24B64,
-        occupiedPixels,
-        grain,
-      });
       const fileName = `nopunk-${state.selected.id}-no-studio-noise.gif`;
-      downloadUrl(`${payload.output.gifUrl}?download=1`, fileName);
-      setTopbarStatus(`Animated grain GIF · ${payload.output.frames} frames · 1s`);
+      if (state.noiseGifAvailable) {
+        try {
+          const imageData = canvas.exportImageData();
+          const rgba24B64 = encodeRgba24B64(imageData.data);
+          const occupiedPixels = Array.from(state.originalOccupied || canvas.getOccupied());
+          const payload = await renderNoStudioNoiseGif({
+            tokenId: state.selected.id,
+            rgba24B64,
+            occupiedPixels,
+            grain,
+          });
+          downloadUrl(`${payload.output.gifUrl}?download=1`, fileName);
+          setTopbarStatus(`Animated grain GIF · ${payload.output.frames} frames · 1s`);
+          return;
+        } catch (error) {
+          if (!/requires the local No-Studio server/i.test(String(error.message || ""))) {
+            throw error;
+          }
+        }
+      }
+
+      const browserGif = await exportNoiseGifInBrowser();
+      downloadBlob(browserGif.blob, fileName);
+      setTopbarStatus(`Animated grain GIF · ${browserGif.frames} frames · 1s`);
     } catch (error) {
       setTopbarStatus(error.message || "Animated GIF export failed");
     } finally {
@@ -2180,7 +2234,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       state.noiseGifAvailable = cfg.noiseGifAvailable !== false;
       state.noGalleryAvailable = cfg.noGalleryAvailable !== false;
       if (!state.noiseGifAvailable) {
-        els.exportGif.title = "Animated grain GIF export is only available on the local No-Studio server.";
+        els.exportGif.title = "Animated grain GIF will render in-browser on live deploys.";
       }
       renderGallery();
       refreshGallery({ silent: true });
