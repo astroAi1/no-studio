@@ -1,13 +1,11 @@
-export const TONE_STEP = 4;
+import { clampByte, rgbToHex } from "./color.js";
 
-export function clampByte(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
-}
+export { clampByte };
+export const TONE_STEP = 4;
 
 export function hexFromRgb(rgb) {
   if (!rgb) return "#000000";
-  const toHex = (v) => clampByte(v).toString(16).padStart(2, "0");
-  return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`.toUpperCase();
+  return rgbToHex(rgb.r, rgb.g, rgb.b);
 }
 
 export function collectVisiblePalette(imageData, darkCutoff = 20) {

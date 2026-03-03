@@ -23,6 +23,8 @@ const RENDERS_ROOT = path.join(APP_ROOT, "renders");
 const NO_PALETTE_OUTPUT_ROOT = path.join(RENDERS_ROOT, "no-palette");
 const NO_STUDIO_NOISE_GIF_ROOT = path.join(RENDERS_ROOT, "no-studio-noise-gif");
 const NO_PALETTE_WORKER_PATH = path.join(APP_ROOT, "scripts", "nopalette_worker.py");
+const NO_GALLERY_ROOT = path.join(DATA_ROOT, "no-gallery");
+const NO_GALLERY_INDEX_PATH = path.join(NO_GALLERY_ROOT, "gallery.json");
 
 const FEATURED_IDS = [7804, 0, 52, 9999, 214, 604, 1337, 420, 69, 8888];
 const LEGACY_TOOL_ROUTES = new Set(["/tools/no-palette", "/tools/no-generate", "/tools/gif-lab", "/tools/tcg-forge"]);
@@ -236,7 +238,7 @@ function parseBody(req) {
     let raw = "";
     req.on("data", (chunk) => {
       raw += chunk;
-      if (raw.length > 2_000_000) {
+      if (raw.length > 10_000_000) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -285,11 +287,117 @@ function sendRedirect(res, location) {
   res.end();
 }
 
+function readNoGalleryEntries() {
+  try {
+    if (!fs.existsSync(NO_GALLERY_INDEX_PATH)) return [];
+    const parsed = JSON.parse(fs.readFileSync(NO_GALLERY_INDEX_PATH, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeNoGalleryEntries(entries) {
+  fs.writeFileSync(NO_GALLERY_INDEX_PATH, JSON.stringify(entries, null, 2));
+}
+
+function sanitizeText(value, maxLength = 140) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function galleryItemUrls(fileName, useNoStudioPrefix) {
+  const prefix = useNoStudioPrefix ? "/api/no-studio" : "/api/no-palette";
+  const encoded = encodeURIComponent(fileName);
+  return {
+    pngUrl: `${prefix}/gallery/files/${encoded}`,
+    viewUrl: `${prefix}/gallery/files/${encoded}`,
+  };
+}
+
+function normalizeGalleryEntry(entry, useNoStudioPrefix) {
+  const fileName = String(entry.fileName || "");
+  return {
+    id: String(entry.id || ""),
+    tokenId: Number(entry.tokenId) || 0,
+    family: sanitizeText(entry.family, 32),
+    label: sanitizeText(entry.label, 160),
+    createdAt: entry.createdAt,
+    rolePair: entry.rolePair && typeof entry.rolePair === "object"
+      ? {
+          background: sanitizeText(entry.rolePair.background, 7),
+          figure: sanitizeText(entry.rolePair.figure, 7),
+          mode: sanitizeText(entry.rolePair.mode, 12),
+        }
+      : null,
+    ...galleryItemUrls(fileName, useNoStudioPrefix),
+  };
+}
+
+function saveNoGalleryEntry({ tokenId, pngDataUrl, label, family, rolePair }, useNoStudioPrefix) {
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(pngDataUrl || ""));
+  if (!match) {
+    throw new Error("Invalid PNG payload");
+  }
+  const imageBuffer = Buffer.from(match[1], "base64");
+  if (!imageBuffer.length) {
+    throw new Error("Empty PNG payload");
+  }
+  if (imageBuffer.length > 8_000_000) {
+    throw new Error("PNG too large");
+  }
+
+  const id = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  const fileName = `no-gallery-${id}.png`;
+  const filePath = path.join(NO_GALLERY_ROOT, fileName);
+  if (!filePath.startsWith(NO_GALLERY_ROOT)) {
+    throw new Error("Invalid gallery path");
+  }
+  fs.writeFileSync(filePath, imageBuffer);
+
+  const entries = readNoGalleryEntries();
+  const nextEntry = {
+    id,
+    fileName,
+    tokenId: Number(tokenId) || 0,
+    family: sanitizeText(family, 32),
+    label: sanitizeText(label, 160) || `No-Studio #${Number(tokenId) || 0}`,
+    createdAt: new Date().toISOString(),
+    rolePair: rolePair && typeof rolePair === "object"
+      ? {
+          background: sanitizeText(rolePair.background, 7),
+          figure: sanitizeText(rolePair.figure, 7),
+          mode: sanitizeText(rolePair.mode, 12),
+        }
+      : null,
+  };
+  entries.unshift(nextEntry);
+
+  while (entries.length > 120) {
+    const removed = entries.pop();
+    if (!removed || !removed.fileName) continue;
+    const removedPath = path.join(NO_GALLERY_ROOT, removed.fileName);
+    if (removedPath.startsWith(NO_GALLERY_ROOT) && fs.existsSync(removedPath)) {
+      try {
+        fs.unlinkSync(removedPath);
+      } catch {
+        // ignore old file cleanup failures
+      }
+    }
+  }
+
+  writeNoGalleryEntries(entries);
+  return normalizeGalleryEntry(nextEntry, useNoStudioPrefix);
+}
+
 function createServer({ port = Number(process.env.PORT) || 8792, host = process.env.HOST || "127.0.0.1" } = {}) {
   loadDataset();
   fs.mkdirSync(DATA_ROOT, { recursive: true });
   fs.mkdirSync(NO_PALETTE_OUTPUT_ROOT, { recursive: true });
   fs.mkdirSync(NO_STUDIO_NOISE_GIF_ROOT, { recursive: true });
+  fs.mkdirSync(NO_GALLERY_ROOT, { recursive: true });
 
   const noPaletteDb = new NoPaletteDatabase({
     dbPath: path.join(DATA_ROOT, "no-palette.sqlite"),
@@ -361,8 +469,47 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           ditherEngines: ["diffuse", "bayer", "cluster", "scan"],
           noMinimalismVisibilityModes: ["exact", "soft", "hard"],
           machineDrawerEnabled: true,
+          noGalleryAvailable: true,
           ...config,
         });
+      }
+
+      if (method === "GET" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
+        const limit = clampInt(url.searchParams.get("limit") || 18, 1, 60);
+        const useNoStudioPrefix = pathname.startsWith("/api/no-studio/");
+        const items = readNoGalleryEntries()
+          .slice(0, limit)
+          .map((entry) => normalizeGalleryEntry(entry, useNoStudioPrefix));
+        return sendJson(res, 200, {
+          ok: true,
+          count: items.length,
+          items,
+        });
+      }
+
+      if ((method === "GET" || method === "HEAD") && (pathname.startsWith("/api/no-palette/gallery/files/") || pathname.startsWith("/api/no-studio/gallery/files/"))) {
+        const fileName = decodeURIComponent(pathname.split("/").pop() || "");
+        if (!/^[a-zA-Z0-9._-]+\.png$/.test(fileName)) {
+          return sendJson(res, 400, { ok: false, error: "Invalid gallery file name" });
+        }
+        const filePath = path.join(NO_GALLERY_ROOT, fileName);
+        if (!filePath.startsWith(NO_GALLERY_ROOT) || !fs.existsSync(filePath)) {
+          return sendJson(res, 404, { ok: false, error: "Gallery file not found" });
+        }
+        const headers = {
+          "content-type": "image/png",
+          "cache-control": "no-store",
+        };
+        if (url.searchParams.get("download") === "1") {
+          headers["content-disposition"] = `attachment; filename=\"${fileName}\"`;
+        }
+        res.writeHead(200, headers);
+        if (method === "HEAD") {
+          res.end();
+          return;
+        }
+        res.end(fs.readFileSync(filePath));
+        return;
       }
 
       if (method === "GET" && (pathname === "/api/no-palette/block/head" || pathname === "/api/no-studio/block/head")) {
@@ -515,6 +662,25 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           },
         };
         return sendJson(res, 200, payload);
+      }
+
+      if (method === "POST" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
+        const body = await parseBody(req);
+        const id = toId(body && body.tokenId);
+        if (id === null) return sendJson(res, 400, { ok: false, error: "Invalid tokenId" });
+        const record = loadDataset().byId.get(id);
+        if (!record) return sendJson(res, 404, { ok: false, error: "NoPunk not found" });
+        const entry = saveNoGalleryEntry({
+          tokenId: id,
+          pngDataUrl: body && body.pngDataUrl,
+          label: body && body.label,
+          family: body && body.family,
+          rolePair: body && body.rolePair,
+        }, pathname.startsWith("/api/no-studio/"));
+        return sendJson(res, 200, {
+          ok: true,
+          item: entry,
+        });
       }
 
       if (method === "GET" && pathname.startsWith("/api/punk/")) {

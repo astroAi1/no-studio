@@ -1,14 +1,4 @@
-function hexToRgb(hex) {
-  const clean = String(hex || "").replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(clean)) {
-    throw new Error(`Invalid hex color: ${hex}`);
-  }
-  return {
-    r: Number.parseInt(clean.slice(0, 2), 16),
-    g: Number.parseInt(clean.slice(2, 4), 16),
-    b: Number.parseInt(clean.slice(4, 6), 16),
-  };
-}
+import { hexToRgb } from "./color.js";
 
 function normalizeRgba24Bytes(bytes) {
   const source = bytes instanceof Uint8ClampedArray ? bytes : new Uint8ClampedArray(bytes || []);

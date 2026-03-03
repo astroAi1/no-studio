@@ -5,6 +5,7 @@ const STATIC_STUDIO_CONFIG = {
   blockMode: "manual",
   machineDrawerEnabled: false,
   noiseGifAvailable: false,
+  noGalleryAvailable: false,
   modes: [
     { id: "canonical-machine", label: "Machine", descriptionShort: "Canonical block render", exportKinds: ["single"] },
     { id: "dither-study", label: "Texture", descriptionShort: "Pattern-led block render", exportKinds: ["single"] },
@@ -279,6 +280,34 @@ export async function renderNoStudioNoiseGif(body) {
   }
 }
 
+export async function listNoStudioGallery({ limit = 18 } = {}) {
+  try {
+    return await fetchJson(`/api/no-studio/gallery?limit=${encodeURIComponent(String(limit))}`);
+  } catch (error) {
+    if (isUnavailableApiError(error)) {
+      throw new Error("No-Gallery requires the local No-Studio server");
+    }
+    throw error;
+  }
+}
+
+export async function saveNoStudioGallery(body) {
+  try {
+    return await fetchJson("/api/no-studio/gallery", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (error) {
+    if (isUnavailableApiError(error)) {
+      throw new Error("No-Gallery requires the local No-Studio server");
+    }
+    throw error;
+  }
+}
+
 export async function getNoStudioHistory(tokenId, { limit = 8, offset = 0, mode = null, outputKind = null } = {}) {
   const params = new URLSearchParams({
     limit: String(limit),
@@ -303,3 +332,5 @@ export const getNoPaletteRarity = getNoStudioRarity;
 export const getNoPaletteHead = getNoStudioHead;
 export const generateNoPalette = generateNoStudio;
 export const getNoPaletteHistory = getNoStudioHistory;
+export const listNoPaletteGallery = listNoStudioGallery;
+export const saveNoPaletteGallery = saveNoStudioGallery;

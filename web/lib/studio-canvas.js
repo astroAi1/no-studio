@@ -2,6 +2,7 @@
 // Grid subdivision is the creative axis: presets and dithering apply per-block.
 
 import { getOccupiedPixels, classifyPixelRoles } from "./no-palette-render.js";
+import { hexToRgb as hexToRgbLocal, rgbToHex as rgbToHexLocal } from "./color.js";
 
 const SIZE = 24;
 const BUFFER_LEN = SIZE * SIZE * 4;
@@ -34,6 +35,8 @@ export class StudioCanvas {
       seed: 0,
     };
 
+    this.sheet = null;
+
     this.zoom = 1.0;
     this.panX = 0;
     this.panY = 0;
@@ -55,6 +58,9 @@ export class StudioCanvas {
     this._onMouseMove = this._onMouseMove.bind(this);
     this._onMouseUp = this._onMouseUp.bind(this);
     this._onWheel = this._onWheel.bind(this);
+    this._onTouchStart = this._onTouchStart.bind(this);
+    this._onTouchMove = this._onTouchMove.bind(this);
+    this._onTouchEnd = this._onTouchEnd.bind(this);
 
     this.display.addEventListener("mousedown", this._onMouseDown);
     this.display.addEventListener("mousemove", this._onMouseMove);
@@ -62,6 +68,12 @@ export class StudioCanvas {
     this.display.addEventListener("mouseleave", this._onMouseUp);
     this.display.addEventListener("wheel", this._onWheel, { passive: false });
     this.display.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.display.addEventListener("touchstart", this._onTouchStart, { passive: false });
+    this.display.addEventListener("touchmove", this._onTouchMove, { passive: false });
+    this.display.addEventListener("touchend", this._onTouchEnd);
+    this.display.addEventListener("touchcancel", this._onTouchEnd);
+
+    this._touchState = { active: false, startDist: 0, startZoom: 1, lastCenter: null };
 
     this.display.style.cursor = "crosshair";
   }
@@ -81,6 +93,7 @@ export class StudioCanvas {
     this.zoom = 1.0;
     this.panX = 0;
     this.panY = 0;
+    this.sheet = null;
     this.render();
   }
 
@@ -237,6 +250,7 @@ export class StudioCanvas {
    */
   applyColorMapping(mapping, roles) {
     this._pushUndo();
+    this.sheet = null;
     const map = new Map(Object.entries(mapping || {}).map(([k, v]) => [k.toUpperCase(), v.toUpperCase()]));
     const bgRgb = hexToRgbLocal(roles.background || "#000000");
     const olRgb = hexToRgbLocal(roles.outline || "#040404");
@@ -288,6 +302,7 @@ export class StudioCanvas {
    */
   applyGridMapping(mappingFn) {
     this._pushUndo();
+    this.sheet = null;
     const totalBlocks = this.subdivision * this.subdivision;
 
     this.forEachBlock((bx, by, bs, col, row, blockIdx) => {
@@ -345,6 +360,7 @@ export class StudioCanvas {
    */
   applyGridDither(ditherFn) {
     this._pushUndo();
+    this.sheet = null;
     const bs = this.getBlockSize();
 
     this.forEachBlock((bx, by, blockSize, col, row, blockIdx) => {
@@ -395,6 +411,7 @@ export class StudioCanvas {
 
   applyImageData(imageData) {
     this._pushUndo();
+    this.sheet = null;
     this.buffer.set(imageData.data);
     this._invalidateCaches();
     this.render();
@@ -403,6 +420,7 @@ export class StudioCanvas {
 
   reset() {
     this._pushUndo();
+    this.sheet = null;
     this.buffer.set(this.originalBuffer);
     this._invalidateCaches();
     this.render();
@@ -439,6 +457,32 @@ export class StudioCanvas {
       activeHex: this.grain.activeHex,
       seed: this.grain.seed,
     };
+  }
+
+  setSheetTiles(tiles = [], cols = 2, rows = 2) {
+    const normalizedTiles = Array.isArray(tiles)
+      ? tiles.filter((tile) => tile && tile.width === SIZE && tile.height === SIZE)
+      : [];
+    if (!normalizedTiles.length) return;
+    this.sheet = {
+      tiles: normalizedTiles.map((tile) => new ImageData(new Uint8ClampedArray(tile.data), tile.width, tile.height)),
+      cols: Math.max(1, Number(cols) || 1),
+      rows: Math.max(1, Number(rows) || 1),
+    };
+    const first = this.sheet.tiles[0];
+    if (first) {
+      this.buffer.set(first.data);
+      this._invalidateCaches();
+    }
+    this.render();
+    this.onChange?.();
+  }
+
+  clearSheet() {
+    if (!this.sheet) return;
+    this.sheet = null;
+    this.render();
+    this.onChange?.();
   }
 
   // ── Bg/Outline ────────────────────────────────────────────────
@@ -494,6 +538,12 @@ export class StudioCanvas {
     temp.height = 1024;
     const tctx = temp.getContext("2d");
     tctx.imageSmoothingEnabled = false;
+    if (this.sheet) {
+      tctx.fillStyle = "#040404";
+      tctx.fillRect(0, 0, 1024, 1024);
+      this._drawSheet(tctx, 0, 0, 1024);
+      return temp;
+    }
     const imageData = this.exportImageData();
     this.offscreenCtx.putImageData(imageData, 0, 0);
     tctx.drawImage(this.offscreen, 0, 0, 1024, 1024);
@@ -563,6 +613,12 @@ export class StudioCanvas {
     const offsetX = (w - scaledSize) / 2 + this.panX;
     const offsetY = (h - scaledSize) / 2 + this.panY;
 
+    if (this.sheet) {
+      this._drawSheet(this.ctx, offsetX, offsetY, scaledSize);
+      this._drawSheetGrid(offsetX, offsetY, scaledSize);
+      return;
+    }
+
     this.ctx.imageSmoothingEnabled = false;
     this.ctx.drawImage(this.offscreen, offsetX, offsetY, scaledSize, scaledSize);
     this._drawGrain(this.ctx, offsetX, offsetY, scaledSize);
@@ -609,6 +665,59 @@ export class StudioCanvas {
     targetCtx.imageSmoothingEnabled = false;
     targetCtx.drawImage(grainCanvas, offsetX, offsetY, scaledSize, scaledSize);
     targetCtx.restore();
+  }
+
+  _drawSheet(targetCtx, offsetX, offsetY, scaledSize) {
+    if (!this.sheet || !this.sheet.tiles.length) return;
+    const cols = this.sheet.cols;
+    const rows = this.sheet.rows;
+    const maxAxis = Math.max(cols, rows);
+    const cellSize = scaledSize / maxAxis;
+    const sheetWidth = cellSize * cols;
+    const sheetHeight = cellSize * rows;
+    const startX = offsetX + ((scaledSize - sheetWidth) / 2);
+    const startY = offsetY + ((scaledSize - sheetHeight) / 2);
+
+    targetCtx.save();
+    targetCtx.imageSmoothingEnabled = false;
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        const tile = this.sheet.tiles[(row * cols) + col];
+        if (!tile) continue;
+        this.offscreenCtx.putImageData(tile, 0, 0);
+        targetCtx.drawImage(this.offscreen, startX + (col * cellSize), startY + (row * cellSize), cellSize, cellSize);
+      }
+    }
+    targetCtx.restore();
+  }
+
+  _drawSheetGrid(offsetX, offsetY, scaledSize) {
+    if (!this.sheet) return;
+    const cols = this.sheet.cols;
+    const rows = this.sheet.rows;
+    const maxAxis = Math.max(cols, rows);
+    const cellSize = scaledSize / maxAxis;
+    const sheetWidth = cellSize * cols;
+    const sheetHeight = cellSize * rows;
+    const startX = offsetX + ((scaledSize - sheetWidth) / 2);
+    const startY = offsetY + ((scaledSize - sheetHeight) / 2);
+
+    this.ctx.save();
+    this.ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+    this.ctx.lineWidth = 1;
+    this.ctx.beginPath();
+    for (let i = 0; i <= cols; i += 1) {
+      const x = startX + (i * cellSize);
+      this.ctx.moveTo(x, startY);
+      this.ctx.lineTo(x, startY + sheetHeight);
+    }
+    for (let i = 0; i <= rows; i += 1) {
+      const y = startY + (i * cellSize);
+      this.ctx.moveTo(startX, y);
+      this.ctx.lineTo(startX + sheetWidth, y);
+    }
+    this.ctx.stroke();
+    this.ctx.restore();
   }
 
   _grainTargetMatches(x, y, activeHex) {
@@ -741,6 +850,69 @@ export class StudioCanvas {
     }
   }
 
+  _onTouchStart(e) {
+    if (!this.loaded) return;
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      this._touchState = {
+        active: true,
+        startDist: Math.sqrt(dx * dx + dy * dy),
+        startZoom: this.zoom,
+        lastCenter: {
+          x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+          y: (e.touches[0].clientY + e.touches[1].clientY) / 2,
+        },
+      };
+    } else if (e.touches.length === 1) {
+      e.preventDefault();
+      this._touchState = {
+        active: true,
+        startDist: 0,
+        startZoom: this.zoom,
+        lastCenter: { x: e.touches[0].clientX, y: e.touches[0].clientY },
+      };
+    }
+  }
+
+  _onTouchMove(e) {
+    if (!this._touchState.active || !this.loaded) return;
+    e.preventDefault();
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (this._touchState.startDist > 0) {
+        const scale = dist / this._touchState.startDist;
+        this.setZoom(this._touchState.startZoom * scale);
+      }
+      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      if (this._touchState.lastCenter) {
+        const rect = this.display.getBoundingClientRect();
+        const ratio = this.display.width / rect.width;
+        this.panX += (cx - this._touchState.lastCenter.x) * ratio;
+        this.panY += (cy - this._touchState.lastCenter.y) * ratio;
+      }
+      this._touchState.lastCenter = { x: cx, y: cy };
+      this.render();
+    } else if (e.touches.length === 1 && this._touchState.lastCenter) {
+      const rect = this.display.getBoundingClientRect();
+      const ratio = this.display.width / rect.width;
+      this.panX += (e.touches[0].clientX - this._touchState.lastCenter.x) * ratio;
+      this.panY += (e.touches[0].clientY - this._touchState.lastCenter.y) * ratio;
+      this._touchState.lastCenter = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      this.render();
+    }
+  }
+
+  _onTouchEnd(e) {
+    if (e.touches.length === 0) {
+      this._touchState = { active: false, startDist: 0, startZoom: 1, lastCenter: null };
+    }
+  }
+
   _onWheel(e) {
     e.preventDefault();
     if (!this.loaded) return;
@@ -772,25 +944,14 @@ export class StudioCanvas {
     this.display.removeEventListener("mouseup", this._onMouseUp);
     this.display.removeEventListener("mouseleave", this._onMouseUp);
     this.display.removeEventListener("wheel", this._onWheel);
+    this.display.removeEventListener("touchstart", this._onTouchStart);
+    this.display.removeEventListener("touchmove", this._onTouchMove);
+    this.display.removeEventListener("touchend", this._onTouchEnd);
+    this.display.removeEventListener("touchcancel", this._onTouchEnd);
   }
 }
 
-// ── Local hex utilities ─────────────────────────────────────────────
-
-function hexToRgbLocal(hex) {
-  const clean = String(hex || "").replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return { r: 0, g: 0, b: 0 };
-  return {
-    r: parseInt(clean.slice(0, 2), 16),
-    g: parseInt(clean.slice(2, 4), 16),
-    b: parseInt(clean.slice(4, 6), 16),
-  };
-}
-
-function rgbToHexLocal(r, g, b) {
-  const c = (v) => Math.max(0, Math.min(255, Math.round(v)));
-  return `#${c(r).toString(16).padStart(2, "0")}${c(g).toString(16).padStart(2, "0")}${c(b).toString(16).padStart(2, "0")}`.toUpperCase();
-}
+// Local hex utilities now imported from ./color.js
 
 function noiseAtLocal(x, y, seed = 0, salt = 0) {
   let n = ((((x + 1) * 73856093) ^ ((y + 1) * 19349663) ^ ((seed + 1) * 83492791) ^ ((salt + 1) * 2654435761)) >>> 0);

@@ -1,22 +1,29 @@
-import { getNoStudioConfig, getNoStudioHead, generateNoStudio, renderNoStudioNoiseGif } from "../api.js";
+import {
+  getNoStudioConfig,
+  listNoStudioGallery,
+  renderNoStudioNoiseGif,
+  saveNoStudioGallery,
+  searchPunks,
+} from "../api.js";
 import { mountPunkPicker } from "../components/punk-picker.js";
 import {
   createSourceImageDataFromImage,
   classifyPixelRoles,
-  decodeRgba24B64,
   encodeRgba24B64,
   getOccupiedPixels,
-  imageDataFromRgba24,
 } from "../lib/no-palette-render.js";
+import { createStudioTemplate } from "./no-studio-template.js";
 import { StudioCanvas } from "../lib/studio-canvas.js";
 import {
   applyPreset, createGridPresetFn,
-  buildTheoryPalette, createRandomPreset, DEFAULT_TONE_STEP,
-  hslToRgb, rgbToHsl, rgbToHex, hexToRgb,
+  createRandomPreset, DEFAULT_TONE_STEP,
 } from "../lib/art-presets.js";
+import {
+  hslToRgb, rgbToHsl, rgbToHex, hexToRgb,
+  hexLuma, lerp, mixHex, distanceRgb,
+} from "../lib/color.js";
 import { deriveNoMinimalismPair, deriveRolePair } from "../lib/studio-signature.js";
 import { getStudioProgram, listStudioPrograms } from "../lib/studio-programs.js";
-import { applyStudioDither, previewDitherEngineLabel } from "../lib/floyd-steinberg.js";
 import { exportCanvasPng } from "../lib/download.js";
 
 function escapeHtml(v) {
@@ -73,14 +80,6 @@ async function loadSourceAsset(item) {
   };
 }
 
-function createFallbackModes() {
-  return [
-    { id: "canonical-machine", label: "Machine", descriptionShort: "Block-driven canonical state", exportKinds: ["single"] },
-    { id: "dither-study", label: "Texture", descriptionShort: "Structured texture on 24x24", exportKinds: ["single"] },
-    { id: "serial-pop", label: "Serial", descriptionShort: "Six nearby block states", exportKinds: ["single", "contact-sheet"] },
-  ];
-}
-
 function clampToneStep(value) {
   const step = Math.round(Number(value) || DEFAULT_TONE_STEP);
   return Math.max(1, Math.min(36, step));
@@ -95,18 +94,9 @@ function randomInt(min, max) {
   return Math.floor(min + (Math.random() * ((max - min) + 1)));
 }
 
-function lerp(a, b, t) {
-  return a + ((b - a) * t);
-}
-
 function pickOne(list) {
   if (!Array.isArray(list) || !list.length) return null;
   return list[randomInt(0, list.length - 1)];
-}
-
-function hexLuma(hex) {
-  const rgb = hexToRgb(hex);
-  return (0.2126 * rgb.r) + (0.7152 * rgb.g) + (0.0722 * rgb.b);
 }
 
 function collapsePresetResult(classified, presetResult, totalTones) {
@@ -171,26 +161,6 @@ function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
   return current;
 }
 
-function mixHex(aHex, bHex, t) {
-  const a = hexToRgb(aHex);
-  const b = hexToRgb(bHex);
-  const n = Math.max(0, Math.min(1, Number(t) || 0));
-  return rgbToHex(
-    a.r + ((b.r - a.r) * n),
-    a.g + ((b.g - a.g) * n),
-    a.b + ((b.b - a.b) * n),
-  );
-}
-
-function distanceRgb(aHex, bHex) {
-  const a = hexToRgb(aHex);
-  const b = hexToRgb(bHex);
-  const dr = a.r - b.r;
-  const dg = a.g - b.g;
-  const db = a.b - b.b;
-  return Math.sqrt((dr * dr) + (dg * dg) + (db * db));
-}
-
 const SUBDIVISIONS = [
   { value: 1, label: "1x1" },
   { value: 2, label: "2x2" },
@@ -203,259 +173,10 @@ const SUBDIVISIONS = [
 
 export function mountNoStudioTool(root, shellApi = {}) {
 
-  root.innerHTML = `
-    <div class="studio" data-role="studio">
-      <!-- Toolbar -->
-      <div class="studio-toolbar">
-        <button class="tool-btn is-active" data-tool="pointer" title="Pointer (V)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 2l10 6-5 1-2 5z" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-        </button>
-        <button class="tool-btn" data-tool="paint" title="Paint (B)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="6" y="2" width="4" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M6 12h4v2H6z" fill="currentColor"/></svg>
-        </button>
-        <button class="tool-btn" data-tool="fill" title="Fill Block (G)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/><rect x="4" y="4" width="8" height="8" rx="1" fill="currentColor" opacity=".3"/></svg>
-        </button>
-        <button class="tool-btn" data-tool="eyedropper" title="Eyedropper (I)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M12 2l2 2-8 8-3 1 1-3z" stroke="currentColor" stroke-width="1.5"/></svg>
-        </button>
-        <div class="toolbar-sep"></div>
-        <button class="tool-btn" data-tool="zoom-in" title="Zoom In">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5"/><path d="M5 7h4M7 5v4" stroke="currentColor" stroke-width="1.2"/></svg>
-        </button>
-        <button class="tool-btn" data-tool="zoom-out" title="Zoom Out">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5"/><path d="M5 7h4" stroke="currentColor" stroke-width="1.2"/></svg>
-        </button>
-      </div>
-
-      <!-- Topbar -->
-      <div class="studio-topbar">
-        <div class="topbar-brandlock">
-          <span class="topbar-kicker">Noir de Noir</span>
-          <span class="topbar-brand">NO-STUDIO</span>
-          <span class="topbar-brand-note">Reduce Form. Let Traits Carry.</span>
-        </div>
-        <div class="topbar-sep"></div>
-        <div class="topbar-group">
-          <span class="topbar-label">Grid</span>
-          ${SUBDIVISIONS.map((s) => `<button class="topbar-btn${s.value === 1 ? " is-active" : ""}" data-subdiv="${s.value}">${s.label}</button>`).join("")}
-        </div>
-        <div class="topbar-sep"></div>
-        <div class="topbar-group">
-          <button class="topbar-btn" data-role="undo-btn" disabled>Undo</button>
-          <button class="topbar-btn" data-role="redo-btn" disabled>Redo</button>
-        </div>
-        <span class="topbar-spacer"></span>
-        <button class="topbar-btn sidebar-toggle" data-role="sidebar-toggle">Hide Studio Deck</button>
-        <div class="topbar-status-shell">
-          <span class="topbar-status-label">State</span>
-          <span class="topbar-status" data-role="topbar-status"></span>
-        </div>
-      </div>
-
-      <!-- Canvas -->
-      <div class="studio-canvas" data-role="canvas-area">
-        <div class="canvas-stage-shell">
-          <div class="canvas-stage-head">
-            <span class="canvas-stage-kicker">Noir de Noir</span>
-            <span class="canvas-stage-title" data-role="stage-title">Traits speak in relief</span>
-          </div>
-          <div class="canvas-stage-surface" data-role="canvas-stage-surface">
-            <canvas data-role="display-canvas" width="600" height="600"></canvas>
-            <div class="canvas-empty" data-role="canvas-empty">
-              <span class="canvas-empty-kicker">Noir de Noir</span>
-              <strong>Strip the mass until the traits carry it</strong>
-              <span class="canvas-empty-copy">Start with No-Minimalism. Hold the twin-lift. Add tone, pattern and grain only when they make the traits hit harder.</span>
-            </div>
-          </div>
-          <div class="canvas-stage-foot">
-            <span class="canvas-stage-chip">24×24 truth</span>
-            <span class="canvas-stage-chip">Twin-lift logic</span>
-            <span class="canvas-stage-chip">Trait-first reduction</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="studio-dock-scrim" data-role="dock-scrim" aria-hidden="true"></div>
-
-      <!-- Sidebar -->
-      <div class="studio-sidebar is-open" data-role="sidebar">
-        <div class="sidebar-hero" data-role="sidebar-hero">
-          <div class="sidebar-hero-head">
-            <div class="sidebar-hero-copyblock">
-              <span class="sidebar-hero-kicker">Noir de Noir</span>
-              <strong class="sidebar-hero-title">Traits Speak In Relief</strong>
-            </div>
-            <button class="dock-dismiss" type="button" data-role="dock-dismiss" aria-label="Close studio dock">Close</button>
-          </div>
-          <p class="sidebar-hero-copy">Build from the original punk every time. Strip mass, keep the twin-lift, and push colour, pattern and reduction until the traits do the work.</p>
-        </div>
-        <!-- Source Picker -->
-        <div class="sidebar-section" data-role="source-section">
-          <div class="sidebar-heading">Source</div>
-          <div data-role="picker-host"></div>
-        </div>
-
-        <!-- Active Color -->
-        <div class="sidebar-section" data-role="color-section">
-          <div class="sidebar-heading">Color</div>
-          <div class="color-sliders">
-            <div class="color-slider-row">
-              <span class="color-slider-label">H</span>
-              <input type="range" class="color-slider" data-role="hue-slider" min="0" max="360" value="0" />
-              <span class="color-slider-value" data-role="hue-value">0</span>
-            </div>
-            <div class="color-slider-row">
-              <span class="color-slider-label">S</span>
-              <input type="range" class="color-slider" data-role="sat-slider" min="0" max="100" value="0" />
-              <span class="color-slider-value" data-role="sat-value">0%</span>
-            </div>
-            <div class="color-slider-row">
-              <span class="color-slider-label">L</span>
-              <input type="range" class="color-slider" data-role="lit-slider" min="0" max="100" value="100" />
-              <span class="color-slider-value" data-role="lit-value">100%</span>
-            </div>
-          </div>
-          <div class="color-hex-row">
-            <div class="color-preview" data-role="color-preview" style="background:#FFFFFF"></div>
-            <input type="text" class="color-hex-input" data-role="color-hex" value="#FFFFFF" maxlength="7" spellcheck="false" autocomplete="off" />
-          </div>
-        </div>
-
-        <!-- Punk Palette -->
-        <div class="sidebar-section" data-role="palette-section">
-          <div class="sidebar-heading">Palette</div>
-          <div class="palette-grid" data-role="palette-grid"></div>
-        </div>
-
-        <!-- Studio Dock -->
-        <div class="sidebar-section studio-dock-section" data-role="studio-dock-section">
-          <div class="sidebar-heading">Control Deck <span style="font-weight:400;color:var(--text-dim);font-size:10px" data-role="preset-grid-label">(grid: 1x1)</span></div>
-          <div class="mini-note">One engine. Every cast starts from the original punk, then re-casts the field, mass and finish.</div>
-          <div class="studio-hero-actions">
-            <button class="preset-btn preset-btn--hero" type="button" data-role="surprise-btn">Cast</button>
-            <button class="preset-btn preset-btn--signature" type="button" data-role="hero-no-minimal">No-Minimalism</button>
-          </div>
-          <div class="role-pair-readout hero-role-pair" data-role="hero-role-pair"></div>
-          <div class="preset-tabs">
-            <button class="preset-tab is-active" data-preset-tab="mono">Mono</button>
-            <button class="preset-tab" data-preset-tab="noir">Noir</button>
-            <button class="preset-tab" data-preset-tab="warhol">Pop</button>
-            <button class="preset-tab" data-preset-tab="dither">Pattern</button>
-          </div>
-          <details class="dock-advanced" data-role="dock-advanced">
-            <summary class="dock-advanced-summary">Field Modifiers</summary>
-            <div class="dock-advanced-body">
-              <div class="theory-rail program-rail" data-role="program-rail">
-                <button class="theory-btn" type="button" data-program="monolith">Monolith</button>
-                <button class="theory-btn" type="button" data-program="veil">Veil</button>
-                <button class="theory-btn" type="button" data-program="poster">Poster</button>
-                <button class="theory-btn" type="button" data-program="signal">Signal</button>
-              </div>
-              <div class="color-slider-row">
-                <span class="color-slider-label">Δ</span>
-                <input type="range" class="color-slider" data-role="tone-step-slider" min="1" max="24" value="${DEFAULT_TONE_STEP}" />
-                <span class="color-slider-value" data-role="tone-step-value">${DEFAULT_TONE_STEP}</span>
-              </div>
-              <div class="color-slider-row">
-                <span class="color-slider-label">Min</span>
-                <input type="range" class="color-slider" data-role="minimal-slider" min="3" max="8" value="4" />
-                <span class="color-slider-value" data-role="minimal-value">4</span>
-              </div>
-              <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Twin Lift</div>
-              <div class="theory-rail" data-role="no-minimal-mode-rail">
-                <button class="theory-btn is-active" type="button" data-minimal-mode="exact">Exact</button>
-                <button class="theory-btn" type="button" data-minimal-mode="soft">Soft</button>
-                <button class="theory-btn" type="button" data-minimal-mode="hard">Hard</button>
-              </div>
-              <button class="preset-btn" type="button" data-role="active-bg-toggle">Use Active Color As BG · legacy only · Off</button>
-              <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Pattern Layer</div>
-              <div class="mini-note">Pattern finishing for the current No-Field world. It reacts to the live role pair.</div>
-              <div data-role="dither-controls">
-                <div class="theory-rail" data-role="theory-rail">
-                  <button class="theory-btn is-active" type="button" data-theory="mono">Mono</button>
-                  <button class="theory-btn" type="button" data-theory="complementary">Comp</button>
-                  <button class="theory-btn" type="button" data-theory="triadic">Triad</button>
-                  <button class="theory-btn" type="button" data-theory="split">Split</button>
-                </div>
-                <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Pattern Engine</div>
-                <div class="theory-rail" data-role="dither-engine-rail">
-                  <button class="theory-btn is-active" type="button" data-engine="diffusion">Diffuse</button>
-                  <button class="theory-btn" type="button" data-engine="bayer">Bayer</button>
-                  <button class="theory-btn" type="button" data-engine="cluster">Cluster</button>
-                  <button class="theory-btn" type="button" data-engine="scan">Scan</button>
-                </div>
-                <button class="export-btn export-btn--full" data-role="build-theory" style="margin-top:8px">Retune Pattern</button>
-                <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Pattern Palette (shift-click swatches to add)</div>
-                <div class="dither-colors" data-role="dither-colors"></div>
-                <div class="color-slider-row" style="margin-top:6px">
-                  <span class="color-slider-label" style="font-size:10px">Str</span>
-                  <input type="range" class="color-slider" data-role="dither-strength" min="0" max="100" value="100" />
-                  <span class="color-slider-value" data-role="dither-strength-value">100%</span>
-                </div>
-                <button class="export-btn export-btn--full" data-role="apply-dither" style="margin-top:8px">Apply Pattern</button>
-              </div>
-              <div class="sidebar-heading" style="margin-top:10px;font-size:10px">Finish Grain</div>
-              <div class="mini-note">Presentation-scale grain at 1024. The 24×24 source never changes.</div>
-              <div class="theory-rail noise-target-rail" data-role="noise-target-rail">
-                <button class="theory-btn is-active" type="button" data-noise-target="background">BG</button>
-                <button class="theory-btn" type="button" data-noise-target="active">Band</button>
-                <button class="theory-btn" type="button" data-noise-target="figure">Figure</button>
-              </div>
-              <div class="color-slider-row" style="margin-top:6px">
-                <span class="color-slider-label" style="font-size:10px">N</span>
-                <input type="range" class="color-slider" data-role="noise-amount" min="0" max="100" value="28" />
-                <span class="color-slider-value" data-role="noise-amount-value">28%</span>
-              </div>
-              <button class="export-btn export-btn--full" data-role="apply-noise" style="margin-top:8px">Apply Grain</button>
-            </div>
-          </details>
-          <div class="preset-list" data-role="preset-list"></div>
-        </div>
-
-        <!-- Machine Drawer -->
-        <details class="sidebar-section machine-drawer" data-role="machine-drawer">
-          <summary class="machine-drawer-summary">
-            <span class="sidebar-heading" style="margin:0">Machine Drawer</span>
-            <span class="mini-note">Canonical block-state render</span>
-          </summary>
-          <div class="machine-drawer-body">
-            <div class="server-mode-rail" data-role="server-mode-rail"></div>
-            <div class="server-block-row">
-              <input type="text" class="server-block-input" data-role="block-input" placeholder="Block #" inputmode="numeric" spellcheck="false" autocomplete="off" />
-              <button class="topbar-btn" data-role="latest-btn">Latest</button>
-            </div>
-            <button class="server-generate-btn" data-role="generate-btn" disabled>Generate Canonical</button>
-            <p class="server-status" data-role="server-status"></p>
-          </div>
-        </details>
-
-        <!-- Export -->
-        <div class="sidebar-section">
-          <div class="sidebar-heading">Quick Export</div>
-          <button class="export-btn export-btn--full" data-role="export-gif" disabled>GIF 1s · Animated Grain</button>
-          <div class="export-row">
-            <button class="export-btn" data-role="export-png" disabled>PNG 1024</button>
-            <button class="export-btn" data-role="export-reset" disabled>Reset</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Statusbar -->
-      <div class="studio-statusbar">
-        <div class="status-item" data-role="status-pos">0, 0</div>
-        <div class="status-sep"></div>
-        <div class="status-item">
-          <div class="status-swatch" data-role="status-swatch" style="background:#000000"></div>
-          <span data-role="status-hex">#000000</span>
-        </div>
-        <div class="status-sep"></div>
-        <div class="status-item" data-role="status-zoom">100%</div>
-        <div class="status-sep"></div>
-        <div class="status-item" data-role="status-role">—</div>
-      </div>
-    </div>
-  `;
+  root.innerHTML = createStudioTemplate({
+    subdivisions: SUBDIVISIONS,
+    defaultToneStep: DEFAULT_TONE_STEP,
+  });
 
   // ── Elements ──────────────────────────────────────────────────
 
@@ -487,33 +208,27 @@ export function mountNoStudioTool(root, shellApi = {}) {
     programRail: q("program-rail"),
     presetList: q("preset-list"),
     presetGridLabel: q("preset-grid-label"),
+    dockAdvanced: q("dock-advanced"),
     toneStepSlider: q("tone-step-slider"),
     toneStepValue: q("tone-step-value"),
     minimalSlider: q("minimal-slider"),
     minimalValue: q("minimal-value"),
     noMinimalModeRail: q("no-minimal-mode-rail"),
     activeBgToggle: q("active-bg-toggle"),
-    ditherControls: q("dither-controls"),
-    theoryRail: q("theory-rail"),
-    ditherEngineRail: q("dither-engine-rail"),
-    buildTheory: q("build-theory"),
-    ditherColors: q("dither-colors"),
-    ditherStrength: q("dither-strength"),
-    ditherStrengthValue: q("dither-strength-value"),
-    applyDither: q("apply-dither"),
     noiseTargetRail: q("noise-target-rail"),
     noiseAmount: q("noise-amount"),
     noiseAmountValue: q("noise-amount-value"),
     applyNoise: q("apply-noise"),
-    serverModeRail: q("server-mode-rail"),
-    blockInput: q("block-input"),
-    latestBtn: q("latest-btn"),
-    generateBtn: q("generate-btn"),
-    serverStatus: q("server-status"),
     exportPng: q("export-png"),
     exportGif: q("export-gif"),
+    saveGallery: q("save-gallery"),
     exportReset: q("export-reset"),
+    galleryRefresh: q("gallery-refresh"),
+    galleryList: q("gallery-list"),
     undoBtn: q("undo-btn"), redoBtn: q("redo-btn"),
+    toolReadout: q("tool-readout"),
+    toolReadoutLabel: q("tool-readout-label"),
+    toolReadoutKey: q("tool-readout-key"),
     topbarStatus: q("topbar-status"),
     statusPos: q("status-pos"), statusSwatch: q("status-swatch"),
     statusHex: q("status-hex"), statusZoom: q("status-zoom"), statusRole: q("status-role"),
@@ -526,20 +241,22 @@ export function mountNoStudioTool(root, shellApi = {}) {
     requestToken: 0,
     selected: null,
     selectedImage: null,
-    modes: createFallbackModes(),
-    activeMode: "canonical-machine",
-    liveHeadAvailable: false,
-    latestHead: null,
-    machineDrawerEnabled: true,
+    originalImageData: null,
     noiseGifAvailable: true,
+    noGalleryAvailable: true,
+    galleryItems: [],
+    galleryLoading: false,
+    gallerySaving: false,
+    galleryMessage: "",
+    activeTool: "pointer",
     activePresetTab: "mono",
     noFieldCore: "auto",
     toneStep: DEFAULT_TONE_STEP,
     essentialTones: 4,
     noMinimalDeltaMode: "exact",
     useActiveBg: false,
-    activeTheory: "mono",
-    activeDitherEngine: "diffusion",
+    activeTheory: "contour",
+    activeDitherEngine: "quiet",
     activeNoiseTarget: "background",
     noiseAmount: 28,
     noisePass: 0,
@@ -549,6 +266,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
       mono: null,
       noir: null,
       warhol: null,
+      acid: null,
+      pastel: null,
     },
     sessionSignatures: new Set(),
     sessionSignatureOrder: [],
@@ -562,6 +281,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       { r: 255, g: 255, b: 255 },
       { r: 0, g: 0, b: 0 },
     ],
+    reliefFieldSeed: 0,
     userSubdivision: 1,
     activeColor: { h: 0, s: 0, l: 100 },
     activeColorHex: "#FFFFFF",
@@ -571,7 +291,47 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noFieldFinish: 28,
     noFieldSerial: false,
     noFieldLastFamily: "noir",
+    popSheetLayout: "2x2",
   };
+
+  // ── Session persistence ──────────────────────────────────────
+
+  const SESSION_KEY = "no-studio-session";
+
+  function persistSession() {
+    try {
+      const data = {
+        selectedId: state.selected?.id ?? null,
+        activePresetTab: state.activePresetTab,
+        activeColor: state.activeColor,
+        activeColorHex: state.activeColorHex,
+        userSubdivision: state.userSubdivision,
+        toneStep: state.toneStep,
+        essentialTones: state.essentialTones,
+        noMinimalDeltaMode: state.noMinimalDeltaMode,
+        useActiveBg: state.useActiveBg,
+        activeNoiseTarget: state.activeNoiseTarget,
+        noiseAmount: state.noiseAmount,
+        noFieldIntensity: state.noFieldIntensity,
+        noFieldField: state.noFieldField,
+        noFieldFinish: state.noFieldFinish,
+        popSheetLayout: state.popSheetLayout,
+      };
+      if (state.selected && canvas) {
+        const imageData = canvas.exportImageData();
+        data.canvasBuffer = encodeRgba24B64(imageData.data);
+      }
+      localStorage.setItem(SESSION_KEY, JSON.stringify(data));
+    } catch { /* quota or private mode — ignore */ }
+  }
+
+  function restoreSession() {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
 
   const mobileDockQuery = window.matchMedia("(max-width: 900px)");
   const handleDockMediaChange = (event) => setSidebarOpen(!event.matches);
@@ -583,6 +343,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.sidebarToggle.classList.toggle("is-active", isOpen);
     els.sidebarToggle.textContent = isOpen ? "Hide Studio Deck" : "Open Studio Deck";
     els.sidebarToggle.setAttribute("aria-expanded", String(isOpen));
+    const dockWidth = isOpen ? Math.ceil(els.sidebar.getBoundingClientRect().width) + 28 : 0;
+    const stageShift = isOpen ? Math.max(72, Math.min(140, Math.round(dockWidth * 0.28))) : 0;
+    studioEl.style.setProperty("--dock-width-offset", `${dockWidth}px`);
+    studioEl.style.setProperty("--dock-stage-shift", `${stageShift}px`);
   }
 
   // ── Canvas setup ──────────────────────────────────────────────
@@ -612,6 +376,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       updateUndoRedoButtons();
       updatePaletteGrid();
       updateExportButtons();
+      persistSession();
     },
   });
 
@@ -630,6 +395,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function setTopbarStatus(text = "") {
     els.topbarStatus.textContent = text;
     if (els.stageTitle) els.stageTitle.textContent = text || "Traits speak in relief";
+  }
+
+  function setServerStatus(text) {
+    setTopbarStatus(text);
   }
 
   let signalTimer = null;
@@ -726,7 +495,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function createUniqueVariant(family, sourcePalette) {
     const userAnchorHex = selectedActiveHex();
-    const excludeActiveHex = family === "mono" || family === "noir";
+    const excludeActiveHex = family !== "warhol";
     let fallback = null;
     for (let i = 0; i < 24; i += 1) {
       const preset = createRandomPreset(family, {
@@ -761,8 +530,16 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function setActivePresetTab(tabId) {
     state.activePresetTab = tabId;
+    if (tabId === "mono" || tabId === "noir" || tabId === "warhol" || tabId === "acid" || tabId === "pastel") {
+      state.noFieldCore = tabId;
+    }
     root.querySelectorAll(".preset-tab").forEach((t) => t.classList.toggle("is-active", t.dataset.presetTab === tabId));
     renderPresetList();
+    const label = tabId === "warhol"
+      ? "Pop"
+      : tabId.charAt(0).toUpperCase() + tabId.slice(1);
+    setTopbarStatus(`${label} armed · original-source rerender`);
+    persistSession();
   }
 
   // ── Color controls ────────────────────────────────────────────
@@ -848,7 +625,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function syncActiveBgToggle() {
     if (!els.activeBgToggle) return;
     els.activeBgToggle.classList.toggle("is-active", state.useActiveBg);
-    els.activeBgToggle.textContent = `Use Active Color As BG · legacy only · ${state.useActiveBg ? "On" : "Off"}`;
+    els.activeBgToggle.textContent = `Active BG for Pop · ${state.useActiveBg ? "On" : "Off"}`;
   }
 
   function renderHeroRolePair() {
@@ -874,7 +651,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   els.activeBgToggle?.addEventListener("click", () => {
     state.useActiveBg = !state.useActiveBg;
     syncActiveBgToggle();
-    setTopbarStatus(state.useActiveBg ? "Active background anchor armed" : "Machine-selected background anchor armed");
+    setTopbarStatus(state.useActiveBg ? "Pop uses the active background" : "Pop uses a machine-picked background");
   });
 
   syncActiveBgToggle();
@@ -890,7 +667,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     renderNoMinimalModeRail();
     renderHeroRolePair();
     renderPresetList();
-    setTopbarStatus(`No-Field ${state.noMinimalDeltaMode} twin · world armed`);
+    setTopbarStatus(`No-Minimalism ${state.noMinimalDeltaMode} twin · world armed`);
   });
 
   els.noiseTargetRail?.addEventListener("click", (event) => {
@@ -926,22 +703,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!btn) return;
     const pickedHex = String(btn.dataset.hex || "").toUpperCase();
     setActiveColorFromHex(pickedHex);
-
-    // In dither mode, shift-click adds the picked color to the dither palette.
-    if (state.activePresetTab === "dither" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
-      const rgb = hexToRgb(pickedHex);
-      if (state.ditherPalette.length < 6) {
-        state.ditherPalette.push(rgb);
-        renderDitherColors();
-        setTopbarStatus(`Added ${pickedHex} to dither palette`);
-      }
-      return;
-    }
-
-    if (state.activePresetTab === "dither") {
-      setTopbarStatus(`Active color ${pickedHex} · shift-click to add to dither palette`);
-      return;
-    }
+    setTopbarStatus(`Active color ${pickedHex} armed`);
 
     if (!state.useActiveBg) {
       renderHeroRolePair();
@@ -951,16 +713,59 @@ export function mountNoStudioTool(root, shellApi = {}) {
   // ── Tool selection ────────────────────────────────────────────
 
   const toolbarEl = root.querySelector(".studio-toolbar");
+  const toolButtons = Array.from(toolbarEl.querySelectorAll(".tool-btn[data-tool]"));
+
+  function setToolReadoutFromButton(button) {
+    if (!button || !els.toolReadoutLabel || !els.toolReadoutKey) return;
+    const label = String(button.dataset.toolLabel || button.getAttribute("title") || button.dataset.tool || "Tool");
+    const key = String(button.dataset.toolKey || "").trim() || "—";
+    els.toolReadoutLabel.textContent = label;
+    els.toolReadoutKey.textContent = key;
+  }
+
+  function syncToolReadout(tool = state.activeTool) {
+    const button = toolbarEl.querySelector(`.tool-btn[data-tool="${tool}"]`) || toolbarEl.querySelector('.tool-btn[data-tool="pointer"]');
+    setToolReadoutFromButton(button);
+  }
+
+  toolButtons.forEach((button) => {
+    button.addEventListener("mouseenter", () => setToolReadoutFromButton(button));
+    button.addEventListener("focus", () => setToolReadoutFromButton(button));
+    button.addEventListener("mouseleave", () => syncToolReadout());
+    button.addEventListener("blur", () => {
+      requestAnimationFrame(() => {
+        const focused = document.activeElement instanceof Element ? document.activeElement.closest(".tool-btn[data-tool]") : null;
+        if (focused) {
+          setToolReadoutFromButton(focused);
+          return;
+        }
+        syncToolReadout();
+      });
+    });
+  });
+
   toolbarEl.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-tool]");
     if (!btn) return;
     const tool = btn.dataset.tool;
-    if (tool === "zoom-in") { canvas.zoomIn(); updateZoomStatus(); return; }
-    if (tool === "zoom-out") { canvas.zoomOut(); updateZoomStatus(); return; }
+    if (tool === "zoom-in") {
+      setToolReadoutFromButton(btn);
+      canvas.zoomIn();
+      updateZoomStatus();
+      return;
+    }
+    if (tool === "zoom-out") {
+      setToolReadoutFromButton(btn);
+      canvas.zoomOut();
+      updateZoomStatus();
+      return;
+    }
     toolbarEl.querySelectorAll(".tool-btn[data-tool]").forEach((b) => {
       if (!["zoom-in","zoom-out"].includes(b.dataset.tool)) b.classList.remove("is-active");
     });
     btn.classList.add("is-active");
+    state.activeTool = tool;
+    syncToolReadout(tool);
     canvas.setTool(tool);
   });
 
@@ -978,6 +783,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
     setSubdivisionValue(value, { userDriven: true });
     const sub = SUBDIVISIONS.find((s) => s.value === value);
     setTopbarStatus(`Relief Δ${state.toneStep} · ${sub ? sub.label : value} grid`);
+  });
+
+  root.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-preset-tab]");
+    if (!tab) return;
+    setActivePresetTab(tab.dataset.presetTab || "mono");
   });
 
   // ── Undo/Redo ─────────────────────────────────────────────────
@@ -1010,6 +821,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (key === "=" || key === "+") { canvas.zoomIn(); updateZoomStatus(); }
     if (key === "-") { canvas.zoomOut(); updateZoomStatus(); }
 
+    // Shortcut hints
+    if (key === "?" || (e.shiftKey && key === "/")) { toggleShortcutHints(); return; }
+    if (key === "escape" && shortcutOverlay) { hideShortcutHints(); return; }
+
     // 1-7 for subdivision
     const n = parseInt(key);
     if (n >= 1 && n <= 7 && SUBDIVISIONS[n - 1]) {
@@ -1025,7 +840,58 @@ export function mountNoStudioTool(root, shellApi = {}) {
     });
     const btn = toolbarEl.querySelector(`[data-tool="${tool}"]`);
     if (btn) btn.classList.add("is-active");
+    state.activeTool = tool;
+    syncToolReadout(tool);
     canvas.setTool(tool);
+  }
+
+  syncToolReadout();
+
+  let shortcutOverlay = null;
+
+  function toggleShortcutHints() {
+    if (shortcutOverlay) { hideShortcutHints(); return; }
+    shortcutOverlay = document.createElement("div");
+    shortcutOverlay.className = "shortcut-overlay";
+    shortcutOverlay.innerHTML = `
+      <div class="shortcut-overlay-inner">
+        <div class="shortcut-overlay-title">Keyboard Shortcuts</div>
+        <div class="shortcut-grid">
+          <div class="shortcut-group">
+            <div class="shortcut-group-title">Tools</div>
+            <div class="shortcut-row"><kbd>V</kbd><span>Pointer</span></div>
+            <div class="shortcut-row"><kbd>B</kbd><span>Paint</span></div>
+            <div class="shortcut-row"><kbd>G</kbd><span>Fill Block</span></div>
+            <div class="shortcut-row"><kbd>I</kbd><span>Eyedropper</span></div>
+          </div>
+          <div class="shortcut-group">
+            <div class="shortcut-group-title">Canvas</div>
+            <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd><span>Zoom In / Out</span></div>
+            <div class="shortcut-row"><kbd>1</kbd> – <kbd>7</kbd><span>Grid Subdivision</span></div>
+            <div class="shortcut-row"><kbd>Z</kbd><span>Undo</span></div>
+            <div class="shortcut-row"><kbd>Y</kbd><span>Redo</span></div>
+            <div class="shortcut-row"><kbd>Cmd+Z</kbd><span>Undo</span></div>
+            <div class="shortcut-row"><kbd>Cmd+Shift+Z</kbd><span>Redo</span></div>
+          </div>
+          <div class="shortcut-group">
+            <div class="shortcut-group-title">UI</div>
+            <div class="shortcut-row"><kbd>?</kbd><span>Toggle this overlay</span></div>
+            <div class="shortcut-row"><kbd>Esc</kbd><span>Close overlay</span></div>
+          </div>
+        </div>
+      </div>
+    `;
+    shortcutOverlay.addEventListener("click", (e) => {
+      if (e.target === shortcutOverlay) hideShortcutHints();
+    });
+    studioEl.appendChild(shortcutOverlay);
+  }
+
+  function hideShortcutHints() {
+    if (shortcutOverlay) {
+      shortcutOverlay.remove();
+      shortcutOverlay = null;
+    }
   }
 
   document.addEventListener("keydown", onKeyDown);
@@ -1037,12 +903,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function activeCreativeFamily() {
     if (state.activePresetTab === "noir") return "noir";
     if (state.activePresetTab === "warhol") return "warhol";
+    if (state.activePresetTab === "acid") return "acid";
+    if (state.activePresetTab === "pastel") return "pastel";
     return "mono";
   }
 
   function activeRoleStep() {
     const family = activeCreativeFamily();
-    if (family === "mono" || family === "noir") return 4;
+    if (family === "mono" || family === "noir" || family === "pastel") return 4;
     return state.toneStep;
   }
 
@@ -1118,6 +986,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function refreshNoMinimalPreviewPair() {
     state.noMinimalPreviewPair = generateNoMinimalPreviewPair();
     return state.noMinimalPreviewPair;
+  }
+
+  function syncHeroPairFromRoles(roles, roleStep = activeRoleStep()) {
+    const background = String(roles?.background || "").toUpperCase();
+    const figure = String((roles?.outline || roles?.figure || "")).toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(background) || !/^#[0-9A-F]{6}$/.test(figure)) {
+      return;
+    }
+    state.noMinimalPreviewPair = {
+      background,
+      figure,
+      roleStep,
+    };
   }
 
   function variantChipsMarkup(variant) {
@@ -1274,6 +1155,105 @@ export function mountNoStudioTool(root, shellApi = {}) {
     updateExportButtons();
   }
 
+  function renderGallery() {
+    if (!els.galleryList) return;
+    if (!state.noGalleryAvailable) {
+      els.galleryList.innerHTML = `<div class="gallery-empty">No-Gallery is only available on the local No-Studio server.</div>`;
+      if (els.galleryRefresh) els.galleryRefresh.disabled = true;
+      return;
+    }
+    if (els.galleryRefresh) els.galleryRefresh.disabled = state.galleryLoading;
+    if (state.galleryMessage) {
+      els.galleryList.innerHTML = `<div class="gallery-empty">${escapeHtml(state.galleryMessage)}</div>`;
+      return;
+    }
+    if (state.galleryLoading && !state.galleryItems.length) {
+      els.galleryList.innerHTML = `<div class="gallery-empty">Loading No-Gallery...</div>`;
+      return;
+    }
+    if (!state.galleryItems.length) {
+      els.galleryList.innerHTML = `<div class="gallery-empty">No compositions saved yet.</div>`;
+      return;
+    }
+    els.galleryList.innerHTML = state.galleryItems.map((item) => `
+      <a class="gallery-card" href="${escapeHtml(item.viewUrl || item.pngUrl || "#")}" target="_blank" rel="noreferrer">
+        <img class="gallery-thumb" src="${escapeHtml(item.pngUrl || "")}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
+        <span class="gallery-meta">
+          <span class="gallery-title">${escapeHtml(item.label || `No-Studio #${item.tokenId || 0}`)}</span>
+          <span class="gallery-subline">#${Number(item.tokenId) || 0} · ${(item.family || "studio").toUpperCase()}</span>
+          <span class="gallery-subline">${item.rolePair?.background || "—"} → ${item.rolePair?.figure || "—"}</span>
+        </span>
+      </a>
+    `).join("");
+  }
+
+  async function refreshGallery({ silent = false } = {}) {
+    if (!state.noGalleryAvailable) {
+      renderGallery();
+      return;
+    }
+    state.galleryLoading = true;
+    state.galleryMessage = "";
+    renderGallery();
+    try {
+      const payload = await listNoStudioGallery({ limit: 12 });
+      state.galleryItems = Array.isArray(payload.items) ? payload.items : [];
+      state.galleryMessage = "";
+      if (!silent) setTopbarStatus(`No-Gallery · ${state.galleryItems.length} saved`);
+    } catch (error) {
+      state.galleryItems = [];
+      state.galleryMessage = error.message || "No-Gallery unavailable";
+      if (!silent) setTopbarStatus(state.galleryMessage);
+    } finally {
+      state.galleryLoading = false;
+      renderGallery();
+      updateExportButtons();
+    }
+  }
+
+  async function saveCurrentToGallery() {
+    if (!state.selected || state.gallerySaving) return;
+    if (!state.noGalleryAvailable) {
+      setTopbarStatus("No-Gallery is local-server only");
+      return;
+    }
+    state.gallerySaving = true;
+    updateExportButtons();
+    const originalLabel = els.saveGallery ? els.saveGallery.textContent : "";
+    if (els.saveGallery) {
+      els.saveGallery.disabled = true;
+      els.saveGallery.textContent = "Saving...";
+    }
+    try {
+      const pngDataUrl = canvas.exportPng1024().toDataURL("image/png");
+      const payload = await saveNoStudioGallery({
+        tokenId: state.selected.id,
+        family: state.activePresetTab === "warhol" ? "pop" : state.activePresetTab,
+        label: els.topbarStatus.textContent || `No-Studio #${state.selected.id}`,
+        rolePair: {
+          background: state.noMinimalPreviewPair?.background || currentBackgroundHex(),
+          figure: state.noMinimalPreviewPair?.figure || "—",
+          mode: state.noMinimalDeltaMode,
+        },
+        pngDataUrl,
+      });
+      if (payload?.item) {
+        state.galleryItems = [payload.item, ...state.galleryItems.filter((entry) => entry.id !== payload.item.id)].slice(0, 12);
+      }
+      state.galleryMessage = "";
+      renderGallery();
+      setTopbarStatus("Saved to No-Gallery");
+    } catch (error) {
+      setTopbarStatus(error.message || "Save to No-Gallery failed");
+    } finally {
+      state.gallerySaving = false;
+      if (els.saveGallery) {
+        els.saveGallery.textContent = originalLabel || "Save To No-Gallery";
+      }
+      updateExportButtons();
+    }
+  }
+
   function applyStudioCut(modeId) {
     if (!state.selected || !state.originalRoleMap) return;
     const current = canvas.exportImageData();
@@ -1338,7 +1318,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
 
     const roleStep = activeRoleStep();
-    const roleTag = roleStep === 4 && activeCreativeFamily() !== "warhol" ? "Δ4 role lock" : `Δ${state.toneStep}`;
+    const roleTag = roleStep === 4 && ["mono", "noir", "pastel"].includes(activeCreativeFamily()) ? "Δ4 role lock" : `Δ${state.toneStep}`;
     state.lastReductionMode = modeId;
     canvas.applyImageData(new ImageData(next, current.width, current.height));
     setTopbarStatus(`${cutLabel} · ${roleTag} · ${state.essentialTones} tones`);
@@ -1372,22 +1352,94 @@ export function mountNoStudioTool(root, shellApi = {}) {
     pulseStudio("surprise");
   }
 
+  function getPopSheetSpec(layoutId) {
+    const specs = {
+      "2x2": { cols: 2, rows: 2, label: "2x2" },
+      "3x3": { cols: 3, rows: 3, label: "3x3" },
+      "4x4": { cols: 4, rows: 4, label: "4x4" },
+    };
+    return specs[layoutId] || specs["2x2"];
+  }
+
+  function applyPopSheet(layoutId = state.popSheetLayout) {
+    if (!state.selected || !state.originalImageData) return;
+
+    const { cols, rows, label } = getPopSheetSpec(layoutId);
+    const source = state.originalImageData;
+    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
+    const panelCount = cols * rows;
+    const toneTarget = Math.max(6, state.essentialTones);
+
+    const panelResults = Array.from({ length: panelCount }, () => {
+      const preset = createUniqueVariant("warhol", classified);
+      const result = collapsePresetResult(
+        classified,
+        applyPreset(preset, classified, {
+          toneStep: state.toneStep,
+          roleStep: state.toneStep,
+          backgroundHex: null,
+        }),
+        toneTarget,
+      );
+      return {
+        preset,
+        mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+        roles: result.roles,
+      };
+    });
+
+    const tiles = panelResults.map((panel) => {
+      const tile = new Uint8ClampedArray(source.data.length);
+      for (let y = 0; y < source.height; y += 1) {
+        for (let x = 0; x < source.width; x += 1) {
+          const idx = (y * source.width + x) * 4;
+          const alpha = source.data[idx + 3];
+          let targetHex = panel.roles?.background || "#000000";
+          if (alpha > 0) {
+            const origHex = rgbToHex(source.data[idx], source.data[idx + 1], source.data[idx + 2]).toUpperCase();
+            if (origHex === "#040404") {
+              targetHex = panel.roles?.outline || targetHex;
+            } else if (origHex === "#000000") {
+              targetHex = panel.roles?.background || targetHex;
+            } else {
+              targetHex = panel.mapping.get(origHex) || origHex;
+            }
+          }
+          const rgb = hexToRgb(targetHex);
+          tile[idx] = rgb.r;
+          tile[idx + 1] = rgb.g;
+          tile[idx + 2] = rgb.b;
+          tile[idx + 3] = 255;
+        }
+      }
+      return new ImageData(tile, source.width, source.height);
+    });
+
+    state.variantByFamily.warhol = panelResults[0]?.preset || null;
+    state.noFieldLastFamily = "warhol";
+    state.lastReductionMode = "pop-sheet";
+    canvas.setSheetTiles(tiles, cols, rows);
+    renderVariantPanel();
+    setTopbarStatus(`Pop Sheet · ${label} serial print · full 24×24 tile per panel`);
+    pulseStudio("surprise");
+  }
+
   function noFieldToneTarget() {
     const intensity = Math.max(0, Math.min(100, Number(state.noFieldIntensity) || 0)) / 100;
     return clampEssentialTones(Math.round(lerp(7, 3, intensity)));
   }
 
   function chooseNoFieldFamily() {
-    if (state.noFieldCore === "mono" || state.noFieldCore === "noir" || state.noFieldCore === "warhol") {
+    if (state.noFieldCore === "mono" || state.noFieldCore === "noir" || state.noFieldCore === "warhol" || state.noFieldCore === "acid" || state.noFieldCore === "pastel") {
       return state.noFieldCore;
     }
     const intensity = Math.max(0, Math.min(100, Number(state.noFieldIntensity) || 0)) / 100;
     const field = Math.max(0, Math.min(100, Number(state.noFieldField) || 0)) / 100;
     if (state.noFieldSerial) return "warhol";
-    if (field >= 0.72) return pickOne(["noir", "mono", "warhol"]) || "noir";
-    if (intensity >= 0.72) return pickOne(["mono", "noir"]) || "mono";
-    if (intensity <= 0.28 && field <= 0.42) return pickOne(["warhol", "mono"]) || "warhol";
-    return pickOne(["noir", "mono", "warhol"]) || "noir";
+    if (field >= 0.72) return pickOne(["noir", "acid", "warhol"]) || "noir";
+    if (intensity >= 0.72) return pickOne(["noir", "acid", "pastel"]) || "noir";
+    if (intensity <= 0.28 && field <= 0.42) return pickOne(["warhol", "pastel"]) || "warhol";
+    return pickOne(["noir", "mono", "warhol", "acid", "pastel"]) || "noir";
   }
 
   function buildNoFieldSingle(classified, family, backgroundHex, toneTarget) {
@@ -1395,10 +1447,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.variantByFamily[family] = preset;
     const base = applyPreset(preset, classified, {
       toneStep: state.toneStep,
-      roleStep: family === "mono" || family === "noir" ? 4 : state.toneStep,
+      roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
       backgroundHex,
     });
     const result = collapsePresetResult(classified, base, toneTarget);
+    syncHeroPairFromRoles(result.roles, family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep);
     canvas.applyColorMapping(result.mapping, result.roles);
     return preset;
   }
@@ -1407,13 +1460,23 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const previousSubdiv = canvas.subdivision;
     setSubdivisionValue(2);
     const variants = Array.from({ length: 4 }, () => createUniqueVariant(family, classified));
+    const previewResult = collapsePresetResult(
+      classified,
+      applyPreset(variants[0], classified, {
+        toneStep: state.toneStep,
+        roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
+        backgroundHex,
+      }),
+      toneTarget,
+    );
+    syncHeroPairFromRoles(previewResult.roles, family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep);
     canvas.applyGridMapping((col, row, blockIdx) => {
       const preset = variants[blockIdx] || variants[(row * 2) + col] || variants[0];
       return collapsePresetResult(
         classified,
         applyPreset(preset, classified, {
           toneStep: state.toneStep,
-          roleStep: family === "mono" || family === "noir" ? 4 : state.toneStep,
+          roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
           backgroundHex,
         }),
         toneTarget,
@@ -1423,52 +1486,51 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return previousSubdiv;
   }
 
-  function applyNoField({ holdWorld = false } = {}) {
+  function runNoFieldPass({ family, holdWorld = false, serial = state.noFieldSerial, statusPrefix = "Studio" } = {}) {
     if (!state.selected) {
-      setServerStatus("Select a NoPunk first.", "warn");
-      return;
+      setServerStatus("Select a NoPunk first.");
+      return null;
     }
 
-    if (!state.noFieldSerial && canvas.subdivision !== state.userSubdivision) {
+    if (!serial && canvas.subdivision !== state.userSubdivision) {
       setSubdivisionValue(state.userSubdivision);
     }
 
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const pair = holdWorld ? ensureNoMinimalPreviewPair() : refreshNoMinimalPreviewPair();
-    const family = chooseNoFieldFamily();
+    const pair = holdWorld ? ensureNoMinimalPreviewPair() : null;
+    const backgroundHex = holdWorld ? pair.background : (state.useActiveBg && family === "warhol" ? selectedActiveHex() : null);
     const toneTarget = family === "warhol"
       ? Math.max(6, noFieldToneTarget())
-      : noFieldToneTarget();
+      : family === "acid"
+        ? Math.max(5, noFieldToneTarget())
+        : noFieldToneTarget();
     const fieldLevel = Math.max(0, Math.min(100, Number(state.noFieldField) || 0));
     const finishLevel = Math.max(0, Math.min(100, Number(state.noFieldFinish) || 0));
 
     let previousSubdiv = null;
-    if (state.noFieldSerial) {
-      previousSubdiv = buildNoFieldSerial(classified, family, pair.background, toneTarget);
+    if (serial) {
+      previousSubdiv = buildNoFieldSerial(classified, family, backgroundHex, toneTarget);
     } else {
-      buildNoFieldSingle(classified, family, pair.background, toneTarget);
+      buildNoFieldSingle(classified, family, backgroundHex, toneTarget);
     }
 
     if (fieldLevel >= 58) {
       applyStudioCut(fieldLevel >= 76 ? "relief-field" : "plate-shift");
     }
 
-    const finishNorm = finishLevel / 100;
-    applyDisplayGrain({
-      enabled: finishNorm > 0.02,
-      target: fieldLevel >= 60 ? "background" : "figure",
-      amount: (finishNorm * 0.26) + 0.02,
-      activeHex: nearestPaletteHex(selectedActiveHex()),
-      seed: ++state.noisePass,
-    });
-
     state.noFieldLastFamily = family;
     renderHeroRolePair();
     renderVariantPanel();
-    const familyLabel = family === "warhol" ? "pop" : family;
-    const serialNote = state.noFieldSerial ? ` · serial 2x2${previousSubdiv !== 2 ? " locked" : ""}` : "";
-    setTopbarStatus(`No-Field · ${familyLabel} core · intensity ${state.noFieldIntensity}% · field ${state.noFieldField}% · finish ${state.noFieldFinish}%${serialNote}`);
+    const familyLabel = family === "warhol" ? "Pop" : family.charAt(0).toUpperCase() + family.slice(1);
+    const serialNote = serial ? ` · serial 2x2${previousSubdiv !== 2 ? " locked" : ""}` : "";
+    setTopbarStatus(`${statusPrefix} · ${familyLabel} · intensity ${state.noFieldIntensity}% · field ${state.noFieldField}% · finish ${state.noFieldFinish}%${serialNote}`);
     pulseStudio(holdWorld ? "variant" : "surprise");
+    return { family, pair: state.noMinimalPreviewPair, toneTarget, serial, previousSubdiv };
+  }
+
+  function applyNoField({ holdWorld = false } = {}) {
+    const family = chooseNoFieldFamily();
+    runNoFieldPass({ family, holdWorld, serial: state.noFieldSerial, statusPrefix: "Cast" });
   }
 
   function applyNoMinimalism() {
@@ -1477,7 +1539,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const current = canvas.exportImageData();
     const next = new Uint8ClampedArray(current.data);
     const occupied = state.originalOccupied || canvas.getOccupied();
-    const pair = ensureNoMinimalPreviewPair();
+    const pair = refreshNoMinimalPreviewPair();
 
     for (let y = 0; y < current.height; y += 1) {
       for (let x = 0; x < current.width; x += 1) {
@@ -1496,7 +1558,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
     state.lastReductionMode = "no-minimalism";
     canvas.applyImageData(new ImageData(next, current.width, current.height));
-    refreshNoMinimalPreviewPair();
     renderHeroRolePair();
     setTopbarStatus(`No-Minimalism ${state.noMinimalDeltaMode} · ${pair.background} → ${pair.figure} · ${pair.roleStep} lift · 2 tones`);
     pulseStudio("reduce");
@@ -1507,29 +1568,57 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const familyLabel = state.noFieldLastFamily === "warhol"
       ? "Pop"
       : state.noFieldLastFamily.charAt(0).toUpperCase() + state.noFieldLastFamily.slice(1);
-    const toneTarget = noFieldToneTarget();
+    const activeTab = state.activePresetTab;
+    const toneTarget = activeTab === "warhol"
+      ? Math.max(6, noFieldToneTarget())
+      : activeTab === "acid"
+        ? Math.max(5, noFieldToneTarget())
+        : noFieldToneTarget();
     const world = ensureNoMinimalPreviewPair();
-    const coreLabel = state.noFieldCore === "auto"
-      ? "Auto"
-      : (state.noFieldCore === "warhol" ? "Pop" : state.noFieldCore.charAt(0).toUpperCase() + state.noFieldCore.slice(1));
+    const selectedTool = activeTab === "warhol"
+      ? "Pop"
+      : activeTab.charAt(0).toUpperCase() + activeTab.slice(1);
+    const toolNote = {
+      mono: "Machine-picked monotone fields. Poster compression without losing the twin-lift.",
+      noir: "Dark relief-first casting. Twin-lift stays strict while the mass compresses.",
+      warhol: "Graphic serial color lanes. Build single-frame pop or multi-panel sheets with a unique palette in each cell.",
+      acid: "Synthetic, unstable, corrosive colour tension. High-contrast shifts and sharper, less comfortable harmony.",
+      pastel: "Soft, airy, powder-like colour. Light worlds, gentle separation and restrained contrast.",
+    }[activeTab] || "Original-source recast. Every pass starts from the loaded punk.";
+    const toolActions = `
+        <div class="variant-action-grid">
+          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab === "warhol" ? "warhol" : activeTab}">Cast ${escapeHtml(selectedTool)}</button>
+          ${activeTab === "warhol"
+            ? `
+              <button class="preset-btn" type="button" data-action="build-pop-sheet">Build Pop Sheet</button>
+            `
+            : '<button class="preset-btn" type="button" data-action="hold">Hold World</button>'}
+        </div>
+      `;
+    const popSheetControls = activeTab === "warhol"
+      ? `
+        <div class="variant-title">Sheet Layout</div>
+        <div class="theory-rail pop-sheet-rail">
+          <button class="theory-btn${state.popSheetLayout === "2x2" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="2x2">2x2</button>
+          <button class="theory-btn${state.popSheetLayout === "3x3" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="3x3">3x3</button>
+          <button class="theory-btn${state.popSheetLayout === "4x4" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="4x4">4x4</button>
+        </div>
+        <div class="mini-note no-field-guidance">Each panel uses the original 24×24 punk as a full tile with its own pop palette. The sheet does not resize the punk down inside the tile.</div>
+      `
+      : "";
     els.presetList.innerHTML = `
       <div class="variant-panel no-field-panel">
-        <div class="variant-title">No-Field</div>
+        <div class="variant-title">Current Cast</div>
         <div class="variant-chips">
-          <span class="variant-chip">One engine</span>
-          <span class="variant-chip">Twin-lift world</span>
-          <span class="variant-chip">${escapeHtml(coreLabel)} core</span>
+          <span class="variant-chip">Original-source render</span>
+          <span class="variant-chip">Twin-lift active</span>
+          <span class="variant-chip">${escapeHtml(selectedTool)} family</span>
           <span class="variant-chip">Live pass · ${escapeHtml(familyLabel)}</span>
           <span class="variant-chip">${toneTarget} tones</span>
         </div>
-        <div class="theory-rail no-field-core-rail">
-          <button class="theory-btn${state.noFieldCore === "auto" ? " is-active" : ""}" type="button" data-action="set-core" data-core="auto">Auto</button>
-          <button class="theory-btn${state.noFieldCore === "noir" ? " is-active" : ""}" type="button" data-action="set-core" data-core="noir">Noir</button>
-          <button class="theory-btn${state.noFieldCore === "mono" ? " is-active" : ""}" type="button" data-action="set-core" data-core="mono">Mono</button>
-          <button class="theory-btn${state.noFieldCore === "warhol" ? " is-active" : ""}" type="button" data-action="set-core" data-core="warhol">Pop</button>
-        </div>
-        <div class="role-pair-readout">World armed · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift</div>
-        <div class="mini-note no-field-guidance">Cast uses the current user grid. Serial only runs when you arm it explicitly.</div>
+        <div class="mini-note no-field-guidance">${escapeHtml(toolNote)}</div>
+        <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift</div>
+        <div class="mini-note no-field-guidance">Cast uses your current grid. A sheet only runs when you explicitly build one.</div>
         <div class="no-field-meters">
           <label class="no-field-meter">
             <span class="no-field-meter-label">Intensity</span>
@@ -1547,11 +1636,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
             <span class="color-slider-value">${state.noFieldFinish}%</span>
           </label>
         </div>
-        <div class="variant-action-grid">
-          <button class="preset-btn" type="button" data-action="hold">Hold World</button>
-          <button class="preset-btn" type="button" data-action="toggle-serial">Serial ${state.noFieldSerial ? "On" : "Off"}</button>
-        </div>
-        <button class="preset-btn" type="button" data-action="refresh-pair">New World</button>
+        ${toolActions}
+        ${popSheetControls}
+        <button class="preset-btn" type="button" data-action="refresh-pair">Recast World</button>
         <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
         <div class="variant-chips">
           ${variantChipsMarkup(current)}
@@ -1574,6 +1661,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     let toneTarget = maximal ? 3 : state.essentialTones;
     if (family === "warhol") {
       toneTarget = Math.max(toneTarget, 6);
+    } else if (family === "acid") {
+      toneTarget = Math.max(toneTarget, 5);
     }
 
     if (canvas.subdivision <= 1) {
@@ -1588,76 +1677,88 @@ export function mountNoStudioTool(root, shellApi = {}) {
       });
     }
 
-    const roleTag = presetOptions.roleStep === 4 && family !== "warhol" ? "Δ4 role lock" : `Δ${state.toneStep}`;
+    const roleTag = presetOptions.roleStep === 4 && ["mono", "noir", "pastel"].includes(family) ? "Δ4 role lock" : `Δ${state.toneStep}`;
     state.lastReductionMode = "none";
     renderVariantPanel();
     setTopbarStatus(`${preset.name} · ${roleTag} · ${toneTarget} tones · ${canvas.subdivision}x${canvas.subdivision}`);
     pulseStudio("variant");
   }
 
-  function renderPresetList() {
-    if (els.ditherControls) {
-      els.ditherControls.style.display = "block";
+  function syncStudioDeckVisibility() {
+    if (els.activeBgToggle) {
+      els.activeBgToggle.style.display = state.activePresetTab === "warhol" ? "block" : "none";
     }
+  }
+
+  function renderPresetList() {
+    syncStudioDeckVisibility();
     renderVariantPanel();
   }
 
   els.presetList.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
-    if (btn.dataset.action === "set-core") {
-      state.noFieldCore = btn.dataset.core || "auto";
-      renderVariantPanel();
-      setTopbarStatus(`No-Field core · ${state.noFieldCore === "warhol" ? "Pop" : (state.noFieldCore || "auto")}`);
-      return;
-    }
-    if (btn.dataset.action === "cast") {
-      applyNoField({ holdWorld: false });
-      return;
-    }
     if (btn.dataset.action === "hold") {
       applyNoField({ holdWorld: true });
       return;
     }
-    if (btn.dataset.action === "toggle-serial") {
-      state.noFieldSerial = !state.noFieldSerial;
+    if (btn.dataset.action === "render-core") {
+      const family = btn.dataset.family || activeCreativeFamily();
+      runNoFieldPass({ family, holdWorld: false, serial: false, statusPrefix: `Render ${family === "warhol" ? "Pop" : family.charAt(0).toUpperCase() + family.slice(1)}` });
+      return;
+    }
+    if (btn.dataset.action === "build-pop-sheet") {
+      applyPopSheet(state.popSheetLayout);
+      return;
+    }
+    if (btn.dataset.action === "set-pop-sheet") {
+      state.popSheetLayout = btn.dataset.layout || "2x2";
       renderVariantPanel();
-      setTopbarStatus(`No-Field serial ${state.noFieldSerial ? "armed" : "off"}`);
+      setTopbarStatus(`Pop Sheet ${state.popSheetLayout} armed`);
       return;
     }
     if (btn.dataset.action === "refresh-pair") {
       refreshNoMinimalPreviewPair();
       renderHeroRolePair();
       renderVariantPanel();
-      setTopbarStatus("No-Field world refreshed");
+      setTopbarStatus("World recast");
     }
   });
+
+  let variantPanelRafId = 0;
+  function scheduleVariantPanelRender() {
+    if (variantPanelRafId) return;
+    variantPanelRafId = requestAnimationFrame(() => {
+      variantPanelRafId = 0;
+      renderVariantPanel();
+    });
+  }
 
   els.presetList.addEventListener("input", (e) => {
     const target = e.target.closest("[data-action]");
     if (!target) return;
     if (target.dataset.action === "set-intensity") {
       state.noFieldIntensity = Math.max(0, Math.min(100, Number(target.value) || 0));
-      renderVariantPanel();
+      scheduleVariantPanelRender();
       return;
     }
     if (target.dataset.action === "set-field") {
       state.noFieldField = Math.max(0, Math.min(100, Number(target.value) || 0));
-      renderVariantPanel();
+      scheduleVariantPanelRender();
       return;
     }
     if (target.dataset.action === "set-finish") {
       state.noFieldFinish = Math.max(0, Math.min(100, Number(target.value) || 0));
-      renderVariantPanel();
+      scheduleVariantPanelRender();
     }
   });
 
   function executeStudioProgram(programId) {
     const sourcePalette = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
     const weightedSubdivisions = [1, 2, 4, 4, 6, 6, 8, 8, 12, 12, 24];
-    const families = ["mono", "noir", "warhol", "dither"];
-    const theories = ["mono", "complementary", "triadic", "split"];
-    const engines = ["diffusion", "bayer", "cluster", "scan"];
+    const families = ["mono", "noir", "warhol", "acid", "pastel"];
+    const theories = ["contour", "plate", "halo", "drift"];
+    const engines = ["quiet", "balanced", "signal", "flood"];
 
     function randomizeActiveFromPalette() {
       const picked = pickOne(sourcePalette);
@@ -1671,15 +1772,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
     function pickFamily(program) {
       if (program.familyBias === "pop") return "warhol";
-      if (program.familyBias === "dither") return "dither";
+      if (program.familyBias === "dither") return "acid";
+      if (program.familyBias === "acid" || program.familyBias === "pastel") return program.familyBias;
       if (program.familyBias === "noir" || program.familyBias === "mono") return program.familyBias;
       return pickOne(families) || "mono";
     }
 
     function pickEngine(program) {
-      if (program.ditherBias === "diffuse") return "diffusion";
-      if (program.ditherBias === "mixed" || !program.ditherBias) return pickOne(engines) || "diffusion";
-      return program.ditherBias;
+      if (program.ditherBias === "diffuse") return "quiet";
+      if (program.ditherBias === "mixed" || !program.ditherBias) return pickOne(engines) || "quiet";
+      if (program.ditherBias === "bayer") return "balanced";
+      if (program.ditherBias === "cluster") return "signal";
+      if (program.ditherBias === "scan") return "flood";
+      return "quiet";
     }
 
     function tuneIntensity(program) {
@@ -1711,58 +1816,49 @@ export function mountNoStudioTool(root, shellApi = {}) {
     syncToneStepUI();
     syncMinimalUI();
     syncActiveBgToggle();
-    renderTheoryRail();
-    renderDitherEngineRail();
     setSubdivisionValue(subdivision);
 
     const applyProgramDither = (strengthMin, strengthMax) => {
       buildTheoryFromActiveColor();
-      performDither({ strength: strengthMin + (Math.random() * (strengthMax - strengthMin)) });
+      performDither({ strength: strengthMin + (Math.random() * (strengthMax - strengthMin)), addGrain: false });
     };
 
     if (program.id === "monolith") {
-      setActivePresetTab(pickOne(["mono", "noir"]) || family);
+      setActivePresetTab(pickOne(["mono", "noir", "pastel"]) || family);
       state.essentialTones = 3;
       syncMinimalUI();
       applyCreativeVariant({ maximal: true });
       applyStudioCut("relief-field");
-      applyDisplayGrain({ enabled: true, target: "background", amount: 0.12 + (Math.random() * 0.08), seed: ++state.noisePass });
     } else if (program.id === "signal") {
-      setActivePresetTab(pickOne(["noir", "warhol"]) || family);
+      setActivePresetTab(pickOne(["noir", "warhol", "acid"]) || family);
       applyCreativeVariant({ maximal: false });
       applyStudioCut("plate-shift");
       applyProgramDither(0.68, 0.92);
-      applyDisplayGrain({ enabled: true, target: "figure", amount: 0.16 + (Math.random() * 0.08), seed: ++state.noisePass });
     } else if (program.id === "fracture") {
       setSubdivisionValue(pickOne([6, 8, 12, 24]) || 8);
       setActivePresetTab(family);
       applyCreativeVariant({ maximal: false });
       applyStudioCut("plate-shift");
       applyProgramDither(0.54, 0.84);
-      applyDisplayGrain({ enabled: true, target: "figure", amount: 0.1 + (Math.random() * 0.06), seed: ++state.noisePass });
     } else if (program.id === "echo") {
       setActivePresetTab(pickOne(["noir", "mono"]) || family);
       applyCreativeVariant({ maximal: false });
       applyStudioCut("relief-field");
-      applyDisplayGrain({ enabled: true, target: "active", amount: 0.08 + (Math.random() * 0.06), activeHex: nearestPaletteHex(selectedActiveHex()), seed: ++state.noisePass });
     } else if (program.id === "veil") {
-      setActivePresetTab("mono");
+      setActivePresetTab("pastel");
       state.essentialTones = 3;
       syncMinimalUI();
       applyCreativeVariant({ maximal: true });
       applyStudioCut("relief-field");
-      applyDisplayGrain({ enabled: true, target: "background", amount: 0.18 + (Math.random() * 0.1), seed: ++state.noisePass });
     } else if (program.id === "pulse") {
       setActivePresetTab("warhol");
       applyCreativeVariant({ maximal: false });
       applyProgramDither(0.66, 0.88);
-      applyDisplayGrain({ enabled: true, target: "figure", amount: 0.14 + (Math.random() * 0.08), seed: ++state.noisePass });
     } else if (program.id === "afterimage") {
       setActivePresetTab("noir");
       applyCreativeVariant({ maximal: false });
       applyStudioCut(pickOne(["relief-field", "plate-shift"]) || "relief-field");
       applyProgramDither(0.3, 0.5);
-      applyDisplayGrain({ enabled: true, target: "background", amount: 0.1 + (Math.random() * 0.06), seed: ++state.noisePass });
     } else {
       setActivePresetTab(family);
       state.essentialTones = randomInt(3, 5);
@@ -1770,7 +1866,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       applyCreativeVariant({ maximal: Math.random() < 0.4 });
       applyStudioCut(pickOne(["plate-shift", "relief-field"]) || "plate-shift");
       if (Math.random() < 0.45) applyProgramDither(0.42, 0.7);
-      applyDisplayGrain({ enabled: true, target: "background", amount: 0.1 + (Math.random() * 0.06), seed: ++state.noisePass });
     }
 
     state.lastProgramId = program.id;
@@ -1820,225 +1915,66 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   renderPresetList();
 
-  // ── Dither — Grid-Aware ───────────────────────────────────────
+  // ── Relief Field ──────────────────────────────────────────────
 
-  function renderDitherColors() {
-    els.ditherColors.innerHTML = state.ditherPalette.map((c, i) => {
-      const hex = rgbToHex(c.r, c.g, c.b);
-      return `<button class="dither-color-btn" data-dither-idx="${i}" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)} (click to remove)"></button>`;
-    }).join("") + (state.ditherPalette.length < 6
-      ? '<button class="dither-add-btn" data-role="add-dither-color" title="Add current color">+</button>'
-      : "");
+  function reliefTheoryLabel() {
+    const labels = {
+      contour: "Contour",
+      plate: "Plate",
+      halo: "Halo",
+      drift: "Drift",
+    };
+    return labels[state.activeTheory] || "Contour";
   }
 
-  function renderTheoryRail() {
-    if (!els.theoryRail) return;
-    els.theoryRail.querySelectorAll("[data-theory]").forEach((btn) => {
-      btn.classList.toggle("is-active", btn.dataset.theory === state.activeTheory);
-    });
-  }
-
-  function renderDitherEngineRail() {
-    if (!els.ditherEngineRail) return;
-    els.ditherEngineRail.querySelectorAll("[data-engine]").forEach((btn) => {
-      btn.classList.toggle("is-active", btn.dataset.engine === state.activeDitherEngine);
-    });
+  function reliefBiasLabel() {
+    const labels = {
+      quiet: "Quiet",
+      balanced: "Balanced",
+      signal: "Signal",
+      flood: "Flood",
+    };
+    return labels[state.activeDitherEngine] || "Quiet";
   }
 
   function buildTheoryFromActiveColor() {
-    const rgb = hslToRgb(state.activeColor.h, state.activeColor.s / 100, state.activeColor.l / 100);
-    const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
-    const count = Math.max(2, Math.min(6, state.essentialTones));
-    const palette = buildTheoryPalette(hex, state.activeTheory, { toneStep: state.toneStep, count });
-    state.ditherPalette = palette.map((c) => ({ r: c.r, g: c.g, b: c.b }));
-    renderDitherColors();
-    setTopbarStatus(`Theory ${state.activeTheory} · Δ${state.toneStep} · ${state.ditherPalette.length} tones`);
+    refreshNoMinimalPreviewPair();
+    renderHeroRolePair();
+    setTopbarStatus(`Relief Field retuned · ${reliefTheoryLabel()} · ${reliefBiasLabel()}`);
   }
 
-  function performDither({ strength = null } = {}) {
-    if (!state.selected || state.ditherPalette.length < 2) return;
-    const rawAmount = strength == null ? (Number(els.ditherStrength.value) / 100) : Math.max(0, Math.min(1, Number(strength)));
-    const amount = ditherStrengthForEngine(rawAmount);
-    const reactivePalette = buildReactiveDitherPalette();
-    if (strength != null) {
-      els.ditherStrength.value = String(Math.round(rawAmount * 100));
-      els.ditherStrengthValue.textContent = `${Math.round(rawAmount * 100)}%`;
+  function performDither({ strength = null, addGrain = false } = {}) {
+    if (!state.selected) return;
+    const rawAmount = strength == null
+      ? 0.58
+      : Math.max(0, Math.min(1, Number(strength)));
+
+    const fieldCut = (state.activeTheory === "plate" || state.activeTheory === "drift")
+      ? "plate-shift"
+      : "relief-field";
+    applyStudioCut(fieldCut);
+
+    const amount = Math.max(0, Math.min(1, rawAmount));
+    if (addGrain) {
+      const target = state.activeDitherEngine === "signal" ? "figure" : "background";
+      let grainAmount = 0.04 + (amount * 0.14);
+      if (state.activeDitherEngine === "quiet") grainAmount *= 0.7;
+      if (state.activeDitherEngine === "balanced") grainAmount *= 0.92;
+      if (state.activeDitherEngine === "flood") grainAmount *= 1.28;
+
+      applyDisplayGrain({
+        enabled: grainAmount > 0.02,
+        target,
+        amount: Math.min(0.28, grainAmount),
+        activeHex: target === "figure" ? nearestPaletteHex(selectedActiveHex()) : null,
+        seed: ++state.noisePass,
+      });
     }
 
-    if (canvas.subdivision <= 1) {
-      const imageData = canvas.exportImageData();
-      const occupied = buildEngineOccupiedSet(imageData);
-      const result = applyStudioDither(imageData, reactivePalette, {
-        occupiedPixels: occupied,
-        strength: amount,
-        engine: state.activeDitherEngine,
-        phase: state.toneStep + canvas.subdivision + (state.activeDitherEngine === "bayer" ? 7 : state.activeDitherEngine === "cluster" ? 13 : state.activeDitherEngine === "scan" ? 19 : 3),
-      });
-      canvas.applyImageData(result);
-    } else {
-      canvas.applyGridDither((blockImageData, col, row, blockIdx, blockOccupied) => {
-        if (blockOccupied.size === 0) return null;
-        return applyStudioDither(blockImageData, reactivePalette, {
-          occupiedPixels: blockOccupied,
-          strength: amount,
-          engine: state.activeDitherEngine,
-          phase: blockIdx + state.toneStep + (state.activeDitherEngine === "bayer" ? 5 : state.activeDitherEngine === "cluster" ? 11 : state.activeDitherEngine === "scan" ? 17 : 2),
-        });
-      });
-    }
-    setTopbarStatus(`${previewDitherEngineLabel(state.activeDitherEngine)} pattern · bg reactive · ${reactivePalette.length} tones`);
+    setTopbarStatus(`Relief Field · ${reliefTheoryLabel()} · ${reliefBiasLabel()} · ${Math.round(amount * 100)}% depth`);
     pulseStudio("dither");
   }
-
-  els.ditherColors.addEventListener("click", (e) => {
-    if (e.target.closest("[data-role='add-dither-color']")) {
-      const rgb = hslToRgb(state.activeColor.h, state.activeColor.s / 100, state.activeColor.l / 100);
-      if (state.ditherPalette.length < 6) {
-        state.ditherPalette.push(rgb);
-        renderDitherColors();
-      }
-      return;
-    }
-    const colorBtn = e.target.closest("[data-dither-idx]");
-    if (colorBtn) {
-      // Click to remove from dither palette
-      const idx = Number(colorBtn.dataset.ditherIdx);
-      if (state.ditherPalette.length > 2) {
-        state.ditherPalette.splice(idx, 1);
-        renderDitherColors();
-      }
-    }
-  });
-
-  els.theoryRail?.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-theory]");
-    if (!btn) return;
-    state.activeTheory = btn.dataset.theory;
-    renderTheoryRail();
-  });
-
-  els.ditherEngineRail?.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-engine]");
-    if (!btn) return;
-    state.activeDitherEngine = btn.dataset.engine;
-    renderDitherEngineRail();
-    setTopbarStatus(`${previewDitherEngineLabel(state.activeDitherEngine)} engine armed`);
-  });
-
-  els.buildTheory?.addEventListener("click", buildTheoryFromActiveColor);
-
-  els.ditherStrength.addEventListener("input", () => {
-    els.ditherStrengthValue.textContent = `${els.ditherStrength.value}%`;
-  });
-
-  els.applyDither.addEventListener("click", () => performDither());
   els.applyNoise?.addEventListener("click", applyNoise);
-
-  renderDitherColors();
-  renderTheoryRail();
-  renderDitherEngineRail();
-
-  // ── Server Modes ──────────────────────────────────────────────
-
-  function renderServerModes() {
-    els.serverModeRail.innerHTML = state.modes.map((mode) => `
-      <button class="server-mode-btn${mode.id === state.activeMode ? " is-active" : ""}" data-mode="${escapeHtml(mode.id)}">
-        ${escapeHtml(mode.label)}
-        <small>${escapeHtml(mode.descriptionShort)}</small>
-      </button>
-    `).join("");
-  }
-
-  els.serverModeRail.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-mode]");
-    if (!btn) return;
-    state.activeMode = btn.dataset.mode;
-    renderServerModes();
-    setTopbarStatus(`Server ${btn.textContent.trim()}`);
-  });
-
-  els.latestBtn.addEventListener("click", () => refreshHead({ setBlock: true }));
-  els.generateBtn.addEventListener("click", () => generate());
-  els.blockInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); generate(); } });
-
-  renderServerModes();
-
-  function setServerStatus(text, mode = "") {
-    els.serverStatus.textContent = text;
-    els.serverStatus.dataset.mode = mode;
-  }
-
-  async function generate() {
-    if (!state.machineDrawerEnabled) {
-      setServerStatus("Canonical machine is disabled in static deploy.", "warn");
-      return;
-    }
-    if (!state.selected) { setServerStatus("Select a NoPunk first.", "warn"); return; }
-
-    let blockNumber = parseBlockInput();
-    if (!Number.isFinite(blockNumber) && state.liveHeadAvailable) {
-      await refreshHead({ setBlock: true });
-      blockNumber = parseBlockInput();
-    }
-    if (!Number.isFinite(blockNumber)) { setServerStatus("Enter a block number or use Latest.", "warn"); return; }
-
-    const token = ++state.requestToken;
-    studioEl.classList.add("is-busy");
-    els.generateBtn.disabled = true;
-    const modeLabel = state.modes.find((m) => m.id === state.activeMode)?.label || "";
-    setServerStatus(`Generating ${modeLabel}...`);
-
-    try {
-      const result = await generateNoStudio({
-        tokenId: state.selected.id,
-        mode: state.activeMode,
-        blockNumber,
-        outputKind: "single",
-      });
-      if (state.disposed || token !== state.requestToken) return;
-
-      const pixel24 = result.preview?.pixel24 || {};
-      if (pixel24.rgba24B64) {
-        const bytes = decodeRgba24B64(pixel24.rgba24B64);
-        canvas.applyImageData(imageDataFromRgba24(bytes));
-      }
-      if (result.block && Number.isFinite(Number(result.block.number))) {
-        els.blockInput.value = String(result.block.number);
-      }
-      setServerStatus(`${modeLabel} · block ${blockNumber}`, "ready");
-      setTopbarStatus(`${modeLabel} · block ${blockNumber}`);
-    } catch (error) {
-      if (state.disposed || token !== state.requestToken) return;
-      setServerStatus(error.message || "Generation failed", "error");
-    } finally {
-      if (!state.disposed && token === state.requestToken) {
-        studioEl.classList.remove("is-busy");
-        els.generateBtn.disabled = !state.machineDrawerEnabled || !state.selected;
-      }
-    }
-  }
-
-  function parseBlockInput() {
-    const raw = String(els.blockInput.value || "").trim();
-    if (!/^\d+$/.test(raw)) return null;
-    return parseInt(raw, 10);
-  }
-
-  async function refreshHead({ setBlock = false } = {}) {
-    if (!state.machineDrawerEnabled) {
-      state.liveHeadAvailable = false;
-      return;
-    }
-    try {
-      const payload = await getNoStudioHead();
-      if (state.disposed) return;
-      state.liveHeadAvailable = true;
-      state.latestHead = Number(payload.block.number);
-      if (setBlock || !els.blockInput.value.trim()) els.blockInput.value = String(payload.block.number);
-    } catch {
-      if (!state.disposed) state.liveHeadAvailable = false;
-    }
-  }
 
   // ── Export ────────────────────────────────────────────────────
 
@@ -2047,6 +1983,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const grain = canvas.getDisplayGrain();
     els.exportPng.disabled = !ok;
     els.exportGif.disabled = !state.noiseGifAvailable || !ok || !grain.enabled || !(grain.amount > 0);
+    if (els.saveGallery) {
+      els.saveGallery.disabled = !ok || state.gallerySaving;
+    }
     els.exportReset.disabled = !ok;
   }
 
@@ -2081,6 +2020,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const originalLabel = els.exportGif.textContent;
     els.exportGif.disabled = true;
     els.exportGif.textContent = "Rendering GIF...";
+    studioEl.classList.add("is-exporting");
     setTopbarStatus("Rendering animated grain GIF...");
 
     try {
@@ -2099,6 +2039,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     } catch (error) {
       setTopbarStatus(error.message || "Animated GIF export failed");
     } finally {
+      studioEl.classList.remove("is-exporting");
       els.exportGif.textContent = originalLabel;
       updateExportButtons();
     }
@@ -2111,6 +2052,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
     updatePaletteGrid();
     updateExportButtons();
     setTopbarStatus("Stage reset · grain cleared");
+  });
+
+  els.saveGallery?.addEventListener("click", () => {
+    saveCurrentToGallery();
+  });
+
+  els.galleryRefresh?.addEventListener("click", () => {
+    refreshGallery();
   });
 
   // ── Sidebar toggle / dock drawer ──────────────────────────────
@@ -2135,17 +2084,17 @@ export function mountNoStudioTool(root, shellApi = {}) {
   async function setSelectedPunk(item) {
     state.selected = item || null;
     state.selectedImage = null;
+    state.originalImageData = null;
     state.originalRoleMap = null;
     state.originalOccupied = null;
     state.sourceClassifiedPalette = null;
     state.sourcePaletteHexes = [];
     state.noMinimalPreviewPair = null;
     canvas.clearDisplayGrain();
-    state.variantByFamily = { mono: null, noir: null, warhol: null };
+    state.variantByFamily = { mono: null, noir: null, warhol: null, acid: null, pastel: null };
     state.outputSignatures.clear();
     state.outputSignatureOrder = [];
     renderPresetList();
-    els.generateBtn.disabled = !state.machineDrawerEnabled || !state.selected;
     updateExportButtons();
 
     if (!state.selected) {
@@ -2162,6 +2111,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       if (state.disposed || !state.selected || Number(state.selected.id) !== Number(item.id)) return;
       state.selectedImage = sourceAsset.image;
       const imageData = sourceAsset.imageData;
+      state.originalImageData = new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
       state.originalRoleMap = classifyPixelRoles(imageData);
       state.originalOccupied = getOccupiedPixels(imageData);
       canvas.loadImageData(imageData);
@@ -2180,33 +2130,64 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
   }
 
+  // ── Restore session ──────────────────────────────────────────
+
+  const savedSession = restoreSession();
+  if (savedSession) {
+    if (savedSession.activePresetTab) state.activePresetTab = savedSession.activePresetTab;
+    if (savedSession.activeColor) state.activeColor = savedSession.activeColor;
+    if (savedSession.activeColorHex) state.activeColorHex = savedSession.activeColorHex;
+    if (savedSession.userSubdivision != null) state.userSubdivision = savedSession.userSubdivision;
+    if (savedSession.toneStep != null) state.toneStep = clampToneStep(savedSession.toneStep);
+    if (savedSession.essentialTones != null) state.essentialTones = clampEssentialTones(savedSession.essentialTones);
+    if (savedSession.noMinimalDeltaMode) state.noMinimalDeltaMode = savedSession.noMinimalDeltaMode;
+    if (savedSession.useActiveBg != null) state.useActiveBg = savedSession.useActiveBg;
+    if (savedSession.activeNoiseTarget) state.activeNoiseTarget = savedSession.activeNoiseTarget;
+    if (savedSession.noiseAmount != null) state.noiseAmount = savedSession.noiseAmount;
+    if (savedSession.noFieldIntensity != null) state.noFieldIntensity = savedSession.noFieldIntensity;
+    if (savedSession.noFieldField != null) state.noFieldField = savedSession.noFieldField;
+    if (savedSession.noFieldFinish != null) state.noFieldFinish = savedSession.noFieldFinish;
+    if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
+    syncColorUI();
+    syncToneStepUI();
+    syncMinimalUI();
+    syncActiveBgToggle();
+    renderNoMinimalModeRail();
+    renderNoiseTargetRail();
+    setSubdivisionValue(state.userSubdivision);
+    setActivePresetTab(state.activePresetTab);
+    if (els.noiseAmount) els.noiseAmount.value = String(state.noiseAmount);
+    if (els.noiseAmountValue) els.noiseAmountValue.textContent = `${state.noiseAmount}%`;
+    if (savedSession.selectedId != null) {
+      searchPunks(String(savedSession.selectedId), 1)
+        .then((payload) => {
+          if (state.disposed) return;
+          const item = (payload.items || []).find((i) => Number(i.id) === Number(savedSession.selectedId));
+          if (item) {
+            setSelectedPunk(item);
+            picker.refreshSelection();
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
   // ── Boot ──────────────────────────────────────────────────────
 
   getNoStudioConfig()
     .then((cfg) => {
       if (state.disposed) return;
-      state.modes = Array.isArray(cfg.modes) && cfg.modes.length ? cfg.modes : createFallbackModes();
-      state.activeMode = state.modes.find((m) => m.id === state.activeMode) ? state.activeMode : state.modes[0].id;
-      renderServerModes();
-      state.liveHeadAvailable = Boolean(cfg.liveHeadAvailable);
-      state.machineDrawerEnabled = cfg.machineDrawerEnabled !== false;
       state.noiseGifAvailable = cfg.noiseGifAvailable !== false;
-      els.machineDrawer.hidden = !state.machineDrawerEnabled;
-      els.generateBtn.disabled = !state.machineDrawerEnabled || !state.selected;
+      state.noGalleryAvailable = cfg.noGalleryAvailable !== false;
       if (!state.noiseGifAvailable) {
         els.exportGif.title = "Animated grain GIF export is only available on the local No-Studio server.";
       }
-      const latest = cfg.head?.latestBlockNumber;
-      if (latest != null && Number.isFinite(Number(latest))) {
-        state.latestHead = Number(latest);
-        els.blockInput.value = String(latest);
-      }
+      renderGallery();
+      refreshGallery({ silent: true });
       updateExportButtons();
-      setTopbarStatus(`${state.liveHeadAvailable ? "Live head synced" : "Studio mode"} · traits speak in relief`);
+      setTopbarStatus("Studio mode · traits speak in relief");
     })
     .catch(() => {});
-
-  refreshHead({ setBlock: true });
 
   // ── Cleanup ───────────────────────────────────────────────────
 
@@ -2216,6 +2197,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     document.removeEventListener("keydown", onKeyDown);
     mobileDockQuery.removeEventListener("change", handleDockMediaChange);
     resizeObserver.disconnect();
+    hideShortcutHints();
+    if (variantPanelRafId) cancelAnimationFrame(variantPanelRafId);
     canvas.destroy();
     picker.destroy();
     root.innerHTML = "";

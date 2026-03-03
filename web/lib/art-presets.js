@@ -1,68 +1,14 @@
 // art-presets.js — creative preset systems for No-Palette Studio
 
-// ── HSL ↔ RGB conversion ────────────────────────────────────────────
+import {
+  hslToRgb, rgbToHsl, rgbToHex, hexToRgb, lerp,
+} from "./color.js";
 
-export function hslToRgb(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  s = Math.max(0, Math.min(1, s));
-  l = Math.max(0, Math.min(1, l));
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = l - c / 2;
-  let r;
-  let g;
-  let b;
-  if (h < 60) { r = c; g = x; b = 0; }
-  else if (h < 120) { r = x; g = c; b = 0; }
-  else if (h < 180) { r = 0; g = c; b = x; }
-  else if (h < 240) { r = 0; g = x; b = c; }
-  else if (h < 300) { r = x; g = 0; b = c; }
-  else { r = c; g = 0; b = x; }
-  return {
-    r: Math.round((r + m) * 255),
-    g: Math.round((g + m) * 255),
-    b: Math.round((b + m) * 255),
-  };
-}
-
-export function rgbToHsl(r, g, b) {
-  r /= 255;
-  g /= 255;
-  b /= 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return { h: 0, s: 0, l };
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h;
-  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
-  else if (max === g) h = ((b - r) / d + 2) * 60;
-  else h = ((r - g) / d + 4) * 60;
-  return { h, s, l };
-}
-
-export function rgbToHex(r, g, b) {
-  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
-  return `#${clamp(r).toString(16).padStart(2, "0")}${clamp(g).toString(16).padStart(2, "0")}${clamp(b).toString(16).padStart(2, "0")}`.toUpperCase();
-}
-
-export function hexToRgb(hex) {
-  const clean = String(hex || "").replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return { r: 0, g: 0, b: 0 };
-  return {
-    r: parseInt(clean.slice(0, 2), 16),
-    g: parseInt(clean.slice(2, 4), 16),
-    b: parseInt(clean.slice(4, 6), 16),
-  };
-}
+// Re-export for existing consumers
+export { hslToRgb, rgbToHsl, rgbToHex, hexToRgb };
 
 function clamp01(v) {
   return Math.max(0, Math.min(1, Number(v) || 0));
-}
-
-function lerp(a, b, t) {
-  return a + (b - a) * t;
 }
 
 function luminance(r, g, b) {
@@ -482,6 +428,8 @@ function makeVariantName(family) {
     mono: ["Tone", "Field", "Ghost", "Stack", "Fold", "Echo", "Wash", "Plate"],
     noir: ["Noir", "Void", "Veil", "Night", "Coal", "Smoke", "Relief", "Shadow"],
     warhol: ["Flash", "Burst", "Signal", "Pop", "Voltage", "Chromatic", "Screen", "Panel"],
+    acid: ["Acid", "Neon", "Corrode", "Toxic", "Static", "Volt", "Spill", "Fume"],
+    pastel: ["Pastel", "Powder", "Cloud", "Bloom", "Mist", "Velvet", "Haze", "Soft"],
   };
   const pool = words[family] || ["Variant"];
   const a = pickRandom(pool);
@@ -496,25 +444,25 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
   const anchorHue = anchorHsl.h;
 
   if (family === "mono") {
-    const baseHue = (anchorHue + randomBetween(-8, 8) + 360) % 360;
-    const hueSwing = randomBetween(0.4, 3.2);
-    const hueDrift = randomBetween(0.5, 4.5);
-    const curve = randomBetween(0.82, 1.32);
-    const contrast = randomBetween(0.92, 1.26);
+    const baseHue = (anchorHue + randomBetween(-5, 5) + 360) % 360;
+    const hueSwing = randomBetween(0.2, 1.4);
+    const hueDrift = randomBetween(0.2, 1.8);
+    const curve = randomBetween(0.92, 1.2);
+    const contrast = randomBetween(0.86, 1.08);
     const huePhase = randomBetween(0, Math.PI * 2);
-    const accentPulse = randomBetween(0.005, 0.03);
+    const accentPulse = randomBetween(0.002, 0.012);
     const preset = {
       id: `mono-random-${Math.floor(randomUnit() * 1e9)}`,
       name: makeVariantName("mono"),
       type: "mono",
       baseHue,
-      bgSaturation: randomBetween(0.03, 0.1),
-      bgLightness: randomBetween(0.13, 0.22),
-      bodySaturationMin: randomBetween(0.02, 0.07),
-      bodySaturationMax: randomBetween(0.06, 0.14),
-      accentSaturationMax: randomBetween(0.12, 0.24),
-      bodyLightnessBase: randomBetween(0.24, 0.31),
-      bodyLightnessRange: randomBetween(0.22, 0.32),
+      bgSaturation: randomBetween(0.08, 0.22),
+      bgLightness: randomBetween(0.18, 0.32),
+      bodySaturationMin: randomBetween(0.06, 0.14),
+      bodySaturationMax: randomBetween(0.12, 0.22),
+      accentSaturationMax: randomBetween(0.18, 0.32),
+      bodyLightnessBase: randomBetween(0.28, 0.38),
+      bodyLightnessRange: randomBetween(0.18, 0.26),
       hueSwing,
       hueDrift,
       curve,
@@ -535,26 +483,26 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
   }
 
   if (family === "noir") {
-    const baseHue = (anchorHue + randomBetween(-10, 10) + 360) % 360;
-    const accentHueShift = randomBetween(18, 42);
-    const curve = randomBetween(0.86, 1.36);
+    const baseHue = (anchorHue + randomBetween(-6, 6) + 360) % 360;
+    const accentHueShift = randomBetween(10, 24);
+    const curve = randomBetween(1.02, 1.48);
     const driftPhase = randomBetween(0, Math.PI * 2);
-    const bodyPulse = randomBetween(0.2, 1.2);
-    const accentPulse = randomBetween(3, 11);
-    const depthBias = randomBetween(-0.02, 0.02);
+    const bodyPulse = randomBetween(0.08, 0.42);
+    const accentPulse = randomBetween(1, 4);
+    const depthBias = randomBetween(-0.035, -0.005);
     const preset = {
       id: `noir-random-${Math.floor(randomUnit() * 1e9)}`,
       name: makeVariantName("noir"),
       type: "delta-noir",
       baseHue,
-      baseSaturation: randomBetween(0.02, 0.08),
-      baseLightness: randomBetween(0.04, 0.08),
-      bodyHueShift: randomBetween(0, 3),
+      baseSaturation: randomBetween(0.01, 0.04),
+      baseLightness: randomBetween(0.025, 0.055),
+      bodyHueShift: randomBetween(0, 1.4),
       accentHueShift,
-      bodySaturationLift: randomBetween(0.01, 0.03),
-      accentSaturationLift: randomBetween(0.1, 0.22),
-      bodyLightnessRange: randomBetween(0.05, 0.1),
-      accentLightnessRange: randomBetween(0.22, 0.34),
+      bodySaturationLift: randomBetween(0.004, 0.014),
+      accentSaturationLift: randomBetween(0.05, 0.12),
+      bodyLightnessRange: randomBetween(0.03, 0.065),
+      accentLightnessRange: randomBetween(0.14, 0.24),
       curve,
       driftPhase,
       bodyPulse,
@@ -573,23 +521,98 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
     return preset;
   }
 
+  if (family === "pastel") {
+    const baseHue = (anchorHue + randomBetween(-14, 14) + 360) % 360;
+    const hueSwing = randomBetween(0.8, 3.4);
+    const hueDrift = randomBetween(2, 7);
+    const curve = randomBetween(0.9, 1.12);
+    const contrast = randomBetween(0.82, 0.98);
+    const huePhase = randomBetween(0, Math.PI * 2);
+    const accentPulse = randomBetween(0.004, 0.02);
+    return {
+      id: `pastel-random-${Math.floor(randomUnit() * 1e9)}`,
+      name: makeVariantName("pastel"),
+      type: "mono",
+      baseHue,
+      bgSaturation: randomBetween(0.12, 0.24),
+      bgLightness: randomBetween(0.52, 0.72),
+      bodySaturationMin: randomBetween(0.08, 0.16),
+      bodySaturationMax: randomBetween(0.16, 0.26),
+      accentSaturationMax: randomBetween(0.22, 0.38),
+      bodyLightnessBase: randomBetween(0.56, 0.68),
+      bodyLightnessRange: randomBetween(0.1, 0.18),
+      hueSwing,
+      hueDrift,
+      curve,
+      contrast,
+      huePhase,
+      accentPulse,
+      ui: {
+        family: "Pastel",
+        chips: [
+          `Anchor ${anchorHex}`,
+          `Hue ${Math.round(baseHue)}°`,
+          `Soft ${Math.round(hueSwing)}° / Drift ${Math.round(hueDrift)}°`,
+          `${Math.round(curve * 100)}% curve · ${Math.round(contrast * 100)}% contrast`,
+        ],
+      },
+    };
+  }
+
+  if (family === "acid") {
+    const harmonyOptions = ["complementary", "triadic", "split-complementary"];
+    const harmony = pickRandom(harmonyOptions) || "split-complementary";
+    const baseHue = (anchorHue + randomBetween(-180, 180) + 360) % 360;
+    const contrast = randomBetween(1.45, 2.3);
+    const phase = randomBetween(0, Math.PI * 2);
+    const hueDrift = randomBetween(96, 178);
+    const lumaSpread = randomBetween(1.34, 2.15);
+    const bgHueShift = randomBetween(110, 220) * (randomUnit() > 0.5 ? 1 : -1);
+    const bgContrast = randomBetween(1.18, 1.9);
+    return {
+      id: `acid-random-${Math.floor(randomUnit() * 1e9)}`,
+      name: makeVariantName("acid"),
+      type: "warhol",
+      baseHue,
+      bgSaturation: randomBetween(0.92, 1),
+      bgLightness: randomBetween(0.24, 0.54),
+      colorSaturation: randomBetween(0.96, 1),
+      harmony,
+      contrast,
+      phase,
+      hueDrift,
+      lumaSpread,
+      bgHueShift,
+      bgContrast,
+      ui: {
+        family: "Acid",
+        chips: [
+          `Anchor ${anchorHex}`,
+          `Hue ${Math.round(baseHue)}°`,
+          `${harmony.replace("-", " ")} · ${Math.round(hueDrift)}° drift`,
+          `${Math.round(contrast * 100)}% contrast · ${Math.round(lumaSpread * 100)}% tension`,
+        ],
+      },
+    };
+  }
+
   const harmonyOptions = ["complementary", "triadic", "split-complementary"];
   const harmony = pickRandom(harmonyOptions) || "complementary";
-  const baseHue = (anchorHue + randomBetween(-48, 48) + 360) % 360;
-  const contrast = randomBetween(1.05, 1.7);
+  const baseHue = (anchorHue + randomBetween(-120, 120) + 360) % 360;
+  const contrast = randomBetween(1.24, 2.05);
   const phase = randomBetween(0, Math.PI * 2);
-  const hueDrift = randomBetween(10, 56);
-  const lumaSpread = randomBetween(1.02, 1.5);
-  const bgHueShift = randomBetween(-38, 38);
-  const bgContrast = randomBetween(0.95, 1.45);
+  const hueDrift = randomBetween(42, 128);
+  const lumaSpread = randomBetween(1.24, 2.0);
+  const bgHueShift = randomBetween(72, 196) * (randomUnit() > 0.5 ? 1 : -1);
+  const bgContrast = randomBetween(1.12, 1.72);
   return {
     id: `warhol-random-${Math.floor(randomUnit() * 1e9)}`,
     name: makeVariantName("warhol"),
     type: "warhol",
     baseHue,
-    bgSaturation: randomBetween(0.78, 0.98),
-    bgLightness: randomBetween(0.32, 0.6),
-    colorSaturation: randomBetween(0.82, 0.98),
+    bgSaturation: randomBetween(0.88, 1),
+    bgLightness: randomBetween(0.42, 0.74),
+    colorSaturation: randomBetween(0.92, 1),
     harmony,
     contrast,
     phase,

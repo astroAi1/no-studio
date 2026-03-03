@@ -1,6 +1,6 @@
 const PROGRAMS = [
   { id: "monolith", label: "Monolith", familyBias: "mixed", reductionBias: "lock", ditherBias: "mixed", useActiveBgChance: 0.25, intensityBand: "low" },
-  { id: "signal", label: "Signal", familyBias: "dither", reductionBias: "accent", ditherBias: "scan", useActiveBgChance: 0.55, intensityBand: "mid" },
+  { id: "signal", label: "Signal", familyBias: "acid", reductionBias: "accent", ditherBias: "scan", useActiveBgChance: 0.55, intensityBand: "mid" },
   { id: "fracture", label: "Fracture", familyBias: "mixed", reductionBias: "mask", ditherBias: "cluster", useActiveBgChance: 0.45, intensityBand: "high" },
   { id: "echo", label: "Echo", familyBias: "noir", reductionBias: "lock", ditherBias: "diffuse", useActiveBgChance: 0.4, intensityBand: "mid" },
   { id: "poster", label: "Poster", familyBias: "pop", reductionBias: "accent", ditherBias: "mixed", useActiveBgChance: 0.5, intensityBand: "high" },
