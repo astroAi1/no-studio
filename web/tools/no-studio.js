@@ -1607,12 +1607,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }[activeTab] || "Original-source recast. Every pass starts from the loaded punk.";
     const toolActions = `
         <div class="variant-action-grid">
-          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab === "warhol" ? "warhol" : activeTab}">Cast ${escapeHtml(selectedTool)}</button>
+          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab === "warhol" ? "warhol" : activeTab}" title="Generate a new ${escapeHtml(selectedTool)} render with a fresh random palette">Cast ${escapeHtml(selectedTool)}</button>
           ${activeTab === "warhol"
             ? `
-              <button class="preset-btn" type="button" data-action="build-pop-sheet">Build Pop Sheet</button>
+              <button class="preset-btn" type="button" data-action="build-pop-sheet" title="Create a multi-panel grid, each cell gets its own pop palette">Build Pop Sheet</button>
             `
-            : '<button class="preset-btn" type="button" data-action="hold">Hold World</button>'}
+            : `<button class="preset-btn" type="button" data-action="hold" title="Re-render using the same background/outline pair but a new palette variant">Hold World</button>`}
         </div>
       `;
     const popSheetControls = activeTab === "warhol"
@@ -1644,21 +1644,25 @@ export function mountNoStudioTool(root, shellApi = {}) {
             <span class="no-field-meter-label">Intensity</span>
             <input type="range" class="color-slider" data-action="set-intensity" min="0" max="100" value="${state.noFieldIntensity}" />
             <span class="color-slider-value">${state.noFieldIntensity}%</span>
+            <span class="no-field-meter-hint">Reduction strength. High = fewer tones, more abstract. Low = more colours survive.</span>
           </label>
           <label class="no-field-meter">
             <span class="no-field-meter-label">Field</span>
             <input type="range" class="color-slider" data-action="set-field" min="0" max="100" value="${state.noFieldField}" />
             <span class="color-slider-value">${state.noFieldField}%</span>
+            <span class="no-field-meter-hint">Surface texture. Above ~60% adds plate-shift or relief-field cuts to the render.</span>
           </label>
           <label class="no-field-meter">
             <span class="no-field-meter-label">Finish</span>
             <input type="range" class="color-slider" data-action="set-finish" min="0" max="100" value="${state.noFieldFinish}" />
             <span class="color-slider-value">${state.noFieldFinish}%</span>
+            <span class="no-field-meter-hint">Post-process polish. Controls dither and final texture density on the output.</span>
           </label>
         </div>
         ${toolActions}
         ${popSheetControls}
         <button class="preset-btn" type="button" data-action="refresh-pair">Recast World</button>
+        <div class="mini-note no-field-guidance" style="margin-top:6px">Picks a new random background + outline pair. The current sliders still apply.</div>
         <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
         <div class="variant-chips">
           ${variantChipsMarkup(current)}

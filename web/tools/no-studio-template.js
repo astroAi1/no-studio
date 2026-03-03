@@ -143,51 +143,60 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
           <div class="sidebar-heading">Studio Deck <span style="font-weight:400;color:var(--text-dim);font-size:10px" data-role="preset-grid-label">(grid: 1x1)</span></div>
           <div class="mini-note">Every cast re-renders from the loaded punk. No stacked drift. No hidden palette carry-over.</div>
           <div class="studio-hero-actions">
-            <button class="preset-btn preset-btn--hero" type="button" data-role="surprise-btn">Cast</button>
-            <button class="preset-btn preset-btn--signature" type="button" data-role="hero-no-minimal">No-Minimalism</button>
+            <button class="preset-btn preset-btn--hero" type="button" data-role="surprise-btn" title="Randomize everything \u2014 palette family, grid, colours \u2014 and render in one click">Cast</button>
+            <button class="preset-btn preset-btn--signature" type="button" data-role="hero-no-minimal" title="Reduce the punk to just 2 tones: a background colour and a near-identical outline. The signature NoPunks look.">No-Minimalism</button>
           </div>
           <button class="preset-btn preset-btn--gallery" type="button" data-role="save-gallery" disabled>Save To No-Gallery</button>
           <div class="role-pair-readout hero-role-pair" data-role="hero-role-pair"></div>
+          <div class="mini-note">Pick a palette family. Each tab changes the colour character of your next cast.</div>
           <div class="preset-tabs">
-            <button class="preset-tab is-active" data-preset-tab="mono">Mono</button>
-            <button class="preset-tab" data-preset-tab="noir">Noir</button>
-            <button class="preset-tab" data-preset-tab="warhol">Pop</button>
-            <button class="preset-tab" data-preset-tab="acid">Acid</button>
-            <button class="preset-tab" data-preset-tab="pastel">Pastel</button>
+            <button class="preset-tab is-active" data-preset-tab="mono" title="Single-hue tonal range. Clean and restrained.">Mono</button>
+            <button class="preset-tab" data-preset-tab="noir" title="Dark-first palette. Deep shadows, minimal highlights.">Noir</button>
+            <button class="preset-tab" data-preset-tab="warhol" title="Bold graphic colour. Warhol-style pop palette.">Pop</button>
+            <button class="preset-tab" data-preset-tab="acid" title="High-contrast synthetic hues. Uncomfortable and sharp.">Acid</button>
+            <button class="preset-tab" data-preset-tab="pastel" title="Soft powder tones. Gentle, light, low contrast.">Pastel</button>
           </div>
           <details class="dock-advanced" data-role="dock-advanced">
             <summary class="dock-advanced-summary">Studio Modifiers</summary>
             <div class="dock-advanced-body">
+              <div class="sidebar-heading" style="font-size:10px">Programs</div>
+              <div class="mini-note">Pre-built recipes that randomize palette, grid, and effects in one click. Each program has a distinct character.</div>
               <div class="theory-rail program-rail" data-role="program-rail">
-                <button class="theory-btn" type="button" data-program="monolith">Monolith</button>
-                <button class="theory-btn" type="button" data-program="veil">Veil</button>
-                <button class="theory-btn" type="button" data-program="poster">Poster</button>
-                <button class="theory-btn" type="button" data-program="signal">Signal</button>
+                <button class="theory-btn" type="button" data-program="monolith" title="Minimal 3-tone reduction. Stark, poster-flat.">Monolith</button>
+                <button class="theory-btn" type="button" data-program="veil" title="Soft pastel wash. Quiet, airy, low contrast.">Veil</button>
+                <button class="theory-btn" type="button" data-program="poster" title="Bold pop colours. High contrast, graphic punch.">Poster</button>
+                <button class="theory-btn" type="button" data-program="signal" title="Noisy acid texture. Dithered grain, scan lines.">Signal</button>
               </div>
+              <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Tone Control</div>
+              <div class="mini-note">How far apart the background and outline colours sit. Higher = more contrast between layers.</div>
               <div class="color-slider-row">
                 <span class="color-slider-label">\u0394</span>
                 <input type="range" class="color-slider" data-role="tone-step-slider" min="1" max="24" value="${defaultToneStep}" />
                 <span class="color-slider-value" data-role="tone-step-value">${defaultToneStep}</span>
               </div>
+              <div class="mini-note">How many distinct colours survive the reduction. Lower = flatter, more abstract.</div>
               <div class="color-slider-row">
                 <span class="color-slider-label">Min</span>
                 <input type="range" class="color-slider" data-role="minimal-slider" min="3" max="8" value="4" />
                 <span class="color-slider-value" data-role="minimal-value">4</span>
               </div>
               <div class="sidebar-heading" style="margin-top:8px;font-size:10px">Twin Lift</div>
+              <div class="mini-note">Controls how the outline tracks the background. Exact keeps a fixed offset. Soft allows drift. Hard forces maximum separation.</div>
               <div class="theory-rail" data-role="no-minimal-mode-rail">
                 <button class="theory-btn is-active" type="button" data-minimal-mode="exact">Exact</button>
                 <button class="theory-btn" type="button" data-minimal-mode="soft">Soft</button>
                 <button class="theory-btn" type="button" data-minimal-mode="hard">Hard</button>
               </div>
               <button class="preset-btn" type="button" data-role="active-bg-toggle">Active BG for Pop \u00b7 Off</button>
+              <div class="mini-note" style="margin-top:4px">When on, Pop casts use your selected colour as the background instead of picking one from the punk.</div>
               <div class="sidebar-heading" style="margin-top:10px;font-size:10px">Finish Grain</div>
-              <div class="mini-note">Presentation-scale grain at 1024. The 24\u00d724 source never changes.</div>
+              <div class="mini-note">Adds film-like texture to the final 1024px export. Only affects the presentation render \u2014 the 24\u00d724 source stays clean.</div>
               <div class="theory-rail noise-target-rail" data-role="noise-target-rail">
-                <button class="theory-btn is-active" type="button" data-noise-target="background">BG</button>
-                <button class="theory-btn" type="button" data-noise-target="active">Band</button>
-                <button class="theory-btn" type="button" data-noise-target="figure">Figure</button>
+                <button class="theory-btn is-active" type="button" data-noise-target="background" title="Grain on background only">BG</button>
+                <button class="theory-btn" type="button" data-noise-target="active" title="Grain on the outline band">Band</button>
+                <button class="theory-btn" type="button" data-noise-target="figure" title="Grain on the punk figure">Figure</button>
               </div>
+              <div class="mini-note" style="margin-top:4px">Choose where the grain lands: background, the outline band, or the punk itself.</div>
               <div class="color-slider-row" style="margin-top:6px">
                 <span class="color-slider-label" style="font-size:10px">N</span>
                 <input type="range" class="color-slider" data-role="noise-amount" min="0" max="100" value="28" />
