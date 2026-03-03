@@ -1,0 +1,9 @@
+.vercel
+node_modules
+dist
+data
+renders
+static
+.DS_Store
+__pycache__
+*.pyc

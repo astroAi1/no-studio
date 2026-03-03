@@ -1,0 +1,14 @@
+{
+  "name": "no-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "No-Studio: a cinematic noir pixel studio for creative NoPunks reinterpretation.",
+  "main": "server/index.js",
+  "scripts": {
+    "build": "node scripts/build-vercel-static.js",
+    "dev": "PORT=${PORT:-8792} node server/index.js",
+    "test": "node --test tests/*.test.js",
+    "smoke:agent-browser": "bash scripts/agent-browser-smoke.sh"
+  },
+  "license": "UNLICENSED"
+}
