@@ -47,55 +47,25 @@ function packCodesLsb(codes) {
 function lzwEncode(indices, minCodeSize = 8) {
   const clearCode = 1 << minCodeSize;
   const endCode = clearCode + 1;
-  const maxCode = 4095;
-
-  let dict = new Map();
-  let nextCode = endCode + 1;
-  let codeSize = minCodeSize + 1;
-
-  const resetDict = () => {
-    dict = new Map();
-    nextCode = endCode + 1;
-    codeSize = minCodeSize + 1;
-  };
-
+  const codeSize = minCodeSize + 1;
+  // Keep the stream in the safe 9-bit range by clearing before the decoder's
+  // dynamic table would need to grow. This is larger than a fully compressed
+  // LZW stream, but it is stable for large 1024x1024 frames in-browser.
+  const maxLiteralRun = 240;
   const codes = [];
-  const pushCode = (code) => {
-    codes.push({ code, size: codeSize });
-  };
+  let run = 0;
 
-  resetDict();
+  const pushCode = (code) => codes.push({ code, size: codeSize });
+
   pushCode(clearCode);
-
-  let prefix = indices[0];
-  for (let i = 1; i < indices.length; i += 1) {
-    const value = indices[i];
-    const key = `${prefix},${value}`;
-    if (dict.has(key)) {
-      prefix = dict.get(key);
-      continue;
-    }
-
-    pushCode(prefix);
-
-    if (nextCode <= maxCode) {
-      dict.set(key, nextCode);
-      nextCode += 1;
-      if (nextCode === (1 << codeSize) && codeSize < 12) {
-        codeSize += 1;
-      } else if (nextCode > maxCode) {
-        pushCode(clearCode);
-        resetDict();
-      }
-    } else {
+  for (let i = 0; i < indices.length; i += 1) {
+    if (run >= maxLiteralRun) {
       pushCode(clearCode);
-      resetDict();
+      run = 0;
     }
-
-    prefix = value;
+    pushCode(indices[i]);
+    run += 1;
   }
-
-  pushCode(prefix);
   pushCode(endCode);
 
   const packed = packCodesLsb(codes);
