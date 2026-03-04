@@ -5,7 +5,7 @@ const STATIC_STUDIO_CONFIG = {
   blockMode: "manual",
   machineDrawerEnabled: false,
   noiseGifAvailable: false,
-  noGalleryAvailable: false,
+  noGalleryAvailable: true,
   modes: [
     { id: "canonical-machine", label: "Machine", descriptionShort: "Canonical block render", exportKinds: ["single"] },
     { id: "dither-study", label: "Texture", descriptionShort: "Pattern-led block render", exportKinds: ["single"] },
@@ -16,6 +16,8 @@ const STATIC_STUDIO_CONFIG = {
 
 let staticTraitDbPromise = null;
 let staticPunkIndexPromise = null;
+const BROWSER_GALLERY_KEY = "no-studio-browser-gallery-v1";
+const BROWSER_GALLERY_LIMIT = 60;
 
 export async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
@@ -61,6 +63,152 @@ function isUnavailableApiError(error) {
     message.includes("Failed to fetch") ||
     message.includes("NetworkError")
   );
+}
+
+function sanitizeSignatureHandle(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^a-zA-Z0-9_]/g, "")
+    .slice(0, 15);
+  return cleaned ? `@${cleaned}` : "";
+}
+
+function sanitizeHexColor(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  return /^#[0-9A-F]{6}$/.test(raw) ? raw : null;
+}
+
+function sanitizePalette(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of value) {
+    const hex = sanitizeHexColor(item);
+    if (!hex || seen.has(hex)) continue;
+    seen.add(hex);
+    out.push(hex);
+    if (out.length >= 64) break;
+  }
+  return out;
+}
+
+function sanitizeText(value, maxLength = 160) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeMediaType(value) {
+  return String(value || "").toLowerCase() === "gif" ? "gif" : "png";
+}
+
+function normalizeBrowserGalleryItem(entry) {
+  const mediaType = normalizeMediaType(entry && entry.mediaType);
+  const mediaUrl = String(entry?.mediaUrl || "").trim();
+  const palette = sanitizePalette(entry && (entry.palette || entry.paletteHexes || []));
+  return {
+    id: String(entry?.id || ""),
+    tokenId: Number(entry?.tokenId) || 0,
+    family: sanitizeText(entry?.family, 32),
+    label: sanitizeText(entry?.label, 160) || `No-Studio #${Number(entry?.tokenId) || 0}`,
+    createdAt: entry?.createdAt || new Date().toISOString(),
+    signatureHandle: sanitizeSignatureHandle(entry?.signatureHandle || entry?.signature || entry?.twitterHandle || ""),
+    palette,
+    paletteCount: palette.length,
+    rolePair: entry?.rolePair && typeof entry.rolePair === "object"
+      ? {
+          background: sanitizeHexColor(entry.rolePair.background) || "",
+          figure: sanitizeHexColor(entry.rolePair.figure) || "",
+          mode: sanitizeText(entry.rolePair.mode, 12),
+        }
+      : null,
+    mediaType,
+    mediaUrl,
+    thumbUrl: mediaUrl,
+    viewUrl: mediaUrl,
+    pngUrl: mediaType === "png" ? mediaUrl : null,
+    gifUrl: mediaType === "gif" ? mediaUrl : null,
+  };
+}
+
+function readBrowserGallery() {
+  try {
+    const raw = localStorage.getItem(BROWSER_GALLERY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((entry) => normalizeBrowserGalleryItem(entry)).filter((entry) => entry.id && entry.mediaUrl);
+  } catch {
+    return [];
+  }
+}
+
+function writeBrowserGallery(entries) {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .map((entry) => normalizeBrowserGalleryItem(entry))
+    .filter((entry) => entry.id && entry.mediaUrl)
+    .slice(0, BROWSER_GALLERY_LIMIT);
+
+  let candidate = normalized.slice();
+  while (candidate.length) {
+    try {
+      localStorage.setItem(BROWSER_GALLERY_KEY, JSON.stringify(candidate));
+      return candidate;
+    } catch (error) {
+      if (!/quota/i.test(String(error && error.message || ""))) {
+        throw error;
+      }
+      candidate.pop();
+    }
+  }
+  localStorage.removeItem(BROWSER_GALLERY_KEY);
+  throw new Error("Gallery storage is full in this browser");
+}
+
+async function listNoStudioGalleryBrowser({ limit = 18 } = {}) {
+  const max = Math.max(1, Number(limit) || 18);
+  const items = readBrowserGallery().slice(0, max);
+  return {
+    ok: true,
+    count: items.length,
+    items,
+    storage: "browser",
+  };
+}
+
+async function saveNoStudioGalleryBrowser(body) {
+  const mediaDataUrl = String(body?.mediaDataUrl || body?.pngDataUrl || body?.gifDataUrl || "").trim();
+  const match = /^data:image\/(png|gif);base64,[A-Za-z0-9+/=]+$/i.exec(mediaDataUrl);
+  if (!match) {
+    throw new Error("Invalid media payload");
+  }
+
+  const mediaType = normalizeMediaType(match[1]);
+  const now = Date.now();
+  const id = `${now}-${Math.random().toString(16).slice(2, 10)}`;
+  const palette = sanitizePalette(body?.palette || body?.paletteHexes || []);
+  const entry = normalizeBrowserGalleryItem({
+    id,
+    tokenId: Number(body?.tokenId) || 0,
+    family: body?.family || "studio",
+    label: body?.label,
+    createdAt: new Date(now).toISOString(),
+    signatureHandle: body?.signatureHandle || body?.signature || body?.twitterHandle || "",
+    rolePair: body?.rolePair && typeof body.rolePair === "object" ? body.rolePair : null,
+    mediaType,
+    mediaUrl: mediaDataUrl,
+    palette,
+  });
+
+  const nextEntries = [entry, ...readBrowserGallery().filter((item) => item.id !== entry.id)];
+  writeBrowserGallery(nextEntries);
+  return {
+    ok: true,
+    item: entry,
+    storage: "browser",
+  };
 }
 
 async function loadStaticTraitDb() {
@@ -285,7 +433,7 @@ export async function listNoStudioGallery({ limit = 18 } = {}) {
     return await fetchJson(`/api/no-studio/gallery?limit=${encodeURIComponent(String(limit))}`);
   } catch (error) {
     if (isUnavailableApiError(error)) {
-      throw new Error("No-Gallery requires the local No-Studio server");
+      return listNoStudioGalleryBrowser({ limit });
     }
     throw error;
   }
@@ -302,7 +450,7 @@ export async function saveNoStudioGallery(body) {
     });
   } catch (error) {
     if (isUnavailableApiError(error)) {
-      throw new Error("No-Gallery requires the local No-Studio server");
+      return saveNoStudioGalleryBrowser(body || {});
     }
     throw error;
   }
