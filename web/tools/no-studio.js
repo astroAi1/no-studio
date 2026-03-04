@@ -26,7 +26,6 @@ import { deriveNoMinimalismPair, deriveRolePair } from "../lib/studio-signature.
 import { getStudioProgram, listStudioPrograms } from "../lib/studio-programs.js";
 import { exportCanvasPng } from "../lib/download.js";
 import { encodeIndexedGif, quantizeImageDataToRgb332 } from "../lib/gif-encode.js";
-import { applyStudioDither } from "../lib/floyd-steinberg.js";
 
 function escapeHtml(v) {
   return String(v || "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
@@ -164,6 +163,7 @@ function posterizeScreenPrint(imageData, occupied) {
   const w = imageData.width;
   const h = imageData.height;
   const src = imageData.data;
+  const out = new Uint8ClampedArray(src);
   const colorMap = new Map();
   for (let y = 0; y < h; y += 1) {
     for (let x = 0; x < w; x += 1) {
@@ -178,17 +178,24 @@ function posterizeScreenPrint(imageData, occupied) {
   const allColors = Array.from(colorMap.values())
     .sort((a, b) => (0.2126 * a.r + 0.7152 * a.g + 0.0722 * a.b) - (0.2126 * b.r + 0.7152 * b.g + 0.0722 * b.b));
   if (allColors.length < 2) return imageData;
-  const inkPalette = [allColors[0]];
-  const step = (allColors.length - 1) / 3;
-  for (let i = 1; i <= 3; i += 1) {
-    inkPalette.push(allColors[Math.min(allColors.length - 1, Math.round(step * i))]);
+  const inkCount = Math.min(4, allColors.length);
+  const inks = [];
+  for (let i = 0; i < inkCount; i += 1) {
+    const idx = Math.round((i / (inkCount - 1)) * (allColors.length - 1));
+    inks.push(allColors[idx]);
   }
-  return applyStudioDither(imageData, inkPalette, {
-    engine: "cluster",
-    strength: 0.45,
-    occupiedPixels: occupied,
-    phase: Math.floor(Math.random() * 100),
-  });
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      if (!occupied.has(`${x},${y}`)) continue;
+      const i = (y * w + x) * 4;
+      const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2];
+      const band = Math.min(inkCount - 1, Math.floor((luma / 255) * inkCount));
+      out[i] = inks[band].r;
+      out[i + 1] = inks[band].g;
+      out[i + 2] = inks[band].b;
+    }
+  }
+  return new ImageData(out, w, h);
 }
 
 function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
@@ -1449,7 +1456,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       };
     });
 
-    const occupiedSet = getOccupiedPixels(source);
     const tiles = panelResults.map((panel) => {
       const tile = new Uint8ClampedArray(source.data.length);
       for (let y = 0; y < source.height; y += 1) {
@@ -1474,8 +1480,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
           tile[idx + 3] = 255;
         }
       }
-      const tileImageData = new ImageData(tile, source.width, source.height);
-      return posterizeScreenPrint(tileImageData, occupiedSet);
+      return new ImageData(tile, source.width, source.height);
     });
 
     state.variantByFamily.warhol = panelResults[0]?.preset || null;
@@ -1577,10 +1582,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
       buildNoFieldSingle(classified, family, backgroundHex, toneTarget);
     }
 
-    if (family === "warhol") {
+    if (family === "warhol" && !serial) {
       const spData = canvas.exportImageData();
-      const spOccupied = canvas.getOccupied();
-      canvas.applyImageData(posterizeScreenPrint(spData, spOccupied));
+      canvas.applyImageData(posterizeScreenPrint(spData, canvas.getOccupied()));
     }
 
     if (fieldLevel >= 58) {
@@ -1743,7 +1747,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       });
     }
 
-    if (family === "warhol") {
+    if (family === "warhol" && canvas.subdivision <= 1) {
       const spData = canvas.exportImageData();
       canvas.applyImageData(posterizeScreenPrint(spData, canvas.getOccupied()));
     }
