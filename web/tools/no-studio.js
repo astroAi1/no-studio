@@ -558,6 +558,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const label = tabId === "warhol"
       ? "Pop"
       : tabId.charAt(0).toUpperCase() + tabId.slice(1);
+    const kicker = root.querySelector("[data-role=\"deck-family-kicker\"]");
+    if (kicker) kicker.textContent = label;
     setTopbarStatus(`${label} armed · original-source rerender`);
     persistSession();
   }
@@ -1195,16 +1197,23 @@ export function mountNoStudioTool(root, shellApi = {}) {
       els.galleryList.innerHTML = `<div class="gallery-empty">No compositions saved yet.</div>`;
       return;
     }
-    els.galleryList.innerHTML = state.galleryItems.map((item) => `
+    els.galleryList.innerHTML = state.galleryItems.map((item) => {
+      const bg = item.rolePair?.background || "";
+      const fg = item.rolePair?.figure || "";
+      const colorPair = bg && fg && bg !== "—" && fg !== "—"
+        ? `<span class="gallery-subline gallery-color-pair"><span class="gallery-color-dot" style="background:${escapeHtml(bg)}"></span><span class="gallery-color-dot" style="background:${escapeHtml(fg)}"></span> ${escapeHtml(bg)} → ${escapeHtml(fg)}</span>`
+        : `<span class="gallery-subline">${escapeHtml(bg || "—")} → ${escapeHtml(fg || "—")}</span>`;
+      return `
       <a class="gallery-card" href="${escapeHtml(item.viewUrl || item.pngUrl || "#")}" target="_blank" rel="noreferrer">
         <img class="gallery-thumb" src="${escapeHtml(item.pngUrl || "")}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
         <span class="gallery-meta">
           <span class="gallery-title">${escapeHtml(item.label || `No-Studio #${item.tokenId || 0}`)}</span>
-          <span class="gallery-subline">#${Number(item.tokenId) || 0} · ${(item.family || "studio").toUpperCase()}</span>
-          <span class="gallery-subline">${item.rolePair?.background || "—"} → ${item.rolePair?.figure || "—"}</span>
+          <span class="gallery-subline">#${Number(item.tokenId) || 0} \u00b7 ${(item.family || "studio").toUpperCase()}</span>
+          ${colorPair}
         </span>
       </a>
-    `).join("");
+    `;
+    }).join("");
   }
 
   async function refreshGallery({ silent = false } = {}) {
@@ -1605,14 +1614,18 @@ export function mountNoStudioTool(root, shellApi = {}) {
       acid: "Synthetic, unstable, corrosive colour tension. High-contrast shifts and sharper, less comfortable harmony.",
       pastel: "Soft, airy, powder-like colour. Light worlds, gentle separation and restrained contrast.",
     }[activeTab] || "Original-source recast. Every pass starts from the loaded punk.";
-    const toolActions = `
+    const toolActions = activeTab === "warhol"
+      ? `
         <div class="variant-action-grid">
-          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab === "warhol" ? "warhol" : activeTab}" title="Generate a new ${escapeHtml(selectedTool)} render with a fresh random palette">Cast ${escapeHtml(selectedTool)}</button>
-          ${activeTab === "warhol"
-            ? `
-              <button class="preset-btn" type="button" data-action="build-pop-sheet" title="Create a multi-panel grid, each cell gets its own pop palette">Build Pop Sheet</button>
-            `
-            : `<button class="preset-btn" type="button" data-action="hold" title="Re-render using the same background/outline pair but a new palette variant">Hold World</button>`}
+          <button class="preset-btn" type="button" data-action="render-core" data-family="warhol" title="Generate a new Pop render with a fresh random palette">Cast Pop</button>
+          <button class="preset-btn" type="button" data-action="build-pop-sheet" title="Create a multi-panel grid, each cell gets its own pop palette">Build Pop Sheet</button>
+        </div>
+      `
+      : `
+        <div class="variant-action-grid" style="grid-template-columns:1fr 1fr 1fr">
+          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab}" title="Generate a new ${escapeHtml(selectedTool)} render with a fresh random palette">Cast</button>
+          <button class="preset-btn" type="button" data-action="hold" title="Re-render using the same background/outline pair but a new palette variant">Hold World</button>
+          <button class="preset-btn" type="button" data-action="refresh-pair" title="New random background + outline pair">Recast</button>
         </div>
       `;
     const popSheetControls = activeTab === "warhol"
@@ -1628,17 +1641,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
       : "";
     els.presetList.innerHTML = `
       <div class="variant-panel no-field-panel">
-        <div class="variant-title">Current Cast</div>
-        <div class="variant-chips">
-          <span class="variant-chip">Original-source render</span>
-          <span class="variant-chip">Twin-lift active</span>
-          <span class="variant-chip">${escapeHtml(selectedTool)} family</span>
-          <span class="variant-chip">Live pass · ${escapeHtml(familyLabel)}</span>
-          <span class="variant-chip">${toneTarget} tones</span>
-        </div>
         <div class="mini-note no-field-guidance">${escapeHtml(toolNote)}</div>
-        <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift</div>
-        <div class="mini-note no-field-guidance">Cast uses your current grid. A sheet only runs when you explicitly build one.</div>
+        <div class="role-pair-readout">Role pair \u00b7 ${escapeHtml(world.background)} \u2192 ${escapeHtml(world.figure)} \u00b7 ${world.roleStep} lift</div>
         <div class="no-field-meters">
           <label class="no-field-meter">
             <span class="no-field-meter-label">Intensity</span>
@@ -1661,8 +1665,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
         </div>
         ${toolActions}
         ${popSheetControls}
-        <button class="preset-btn" type="button" data-action="refresh-pair">Recast World</button>
-        <div class="mini-note no-field-guidance" style="margin-top:6px">Picks a new random background + outline pair. The current sliders still apply.</div>
         <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
         <div class="variant-chips">
           ${variantChipsMarkup(current)}
