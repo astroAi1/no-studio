@@ -26,6 +26,7 @@ import { deriveNoMinimalismPair, deriveRolePair } from "../lib/studio-signature.
 import { getStudioProgram, listStudioPrograms } from "../lib/studio-programs.js";
 import { exportCanvasPng } from "../lib/download.js";
 import { encodeIndexedGif, quantizeImageDataToRgb332 } from "../lib/gif-encode.js";
+import { applyStudioDither } from "../lib/floyd-steinberg.js";
 
 function escapeHtml(v) {
   return String(v || "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
@@ -157,6 +158,37 @@ function collapsePresetResult(classified, presetResult, totalTones) {
     ...presetResult,
     mapping: nextMapping,
   };
+}
+
+function posterizeScreenPrint(imageData, occupied) {
+  const w = imageData.width;
+  const h = imageData.height;
+  const src = imageData.data;
+  const colorMap = new Map();
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      if (!occupied.has(`${x},${y}`)) continue;
+      const i = (y * w + x) * 4;
+      const key = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
+      if (!colorMap.has(key)) {
+        colorMap.set(key, { r: src[i], g: src[i + 1], b: src[i + 2] });
+      }
+    }
+  }
+  const allColors = Array.from(colorMap.values())
+    .sort((a, b) => (0.2126 * a.r + 0.7152 * a.g + 0.0722 * a.b) - (0.2126 * b.r + 0.7152 * b.g + 0.0722 * b.b));
+  if (allColors.length < 2) return imageData;
+  const inkPalette = [allColors[0]];
+  const step = (allColors.length - 1) / 3;
+  for (let i = 1; i <= 3; i += 1) {
+    inkPalette.push(allColors[Math.min(allColors.length - 1, Math.round(step * i))]);
+  }
+  return applyStudioDither(imageData, inkPalette, {
+    engine: "cluster",
+    strength: 0.45,
+    occupiedPixels: occupied,
+    phase: Math.floor(Math.random() * 100),
+  });
 }
 
 function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
@@ -1417,6 +1449,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       };
     });
 
+    const occupiedSet = getOccupiedPixels(source);
     const tiles = panelResults.map((panel) => {
       const tile = new Uint8ClampedArray(source.data.length);
       for (let y = 0; y < source.height; y += 1) {
@@ -1441,7 +1474,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
           tile[idx + 3] = 255;
         }
       }
-      return new ImageData(tile, source.width, source.height);
+      const tileImageData = new ImageData(tile, source.width, source.height);
+      return posterizeScreenPrint(tileImageData, occupiedSet);
     });
 
     state.variantByFamily.warhol = panelResults[0]?.preset || null;
@@ -1541,6 +1575,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
       previousSubdiv = buildNoFieldSerial(classified, family, backgroundHex, toneTarget);
     } else {
       buildNoFieldSingle(classified, family, backgroundHex, toneTarget);
+    }
+
+    if (family === "warhol") {
+      const spData = canvas.exportImageData();
+      const spOccupied = canvas.getOccupied();
+      canvas.applyImageData(posterizeScreenPrint(spData, spOccupied));
     }
 
     if (fieldLevel >= 58) {
@@ -1701,6 +1741,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
         const result = baseGridFn(...args);
         return collapsePresetResult(classified, result, toneTarget);
       });
+    }
+
+    if (family === "warhol") {
+      const spData = canvas.exportImageData();
+      canvas.applyImageData(posterizeScreenPrint(spData, canvas.getOccupied()));
     }
 
     const roleTag = presetOptions.roleStep === 4 && ["mono", "noir", "pastel"].includes(family) ? "Δ4 role lock" : `Δ${state.toneStep}`;
