@@ -159,57 +159,6 @@ function collapsePresetResult(classified, presetResult, totalTones) {
   };
 }
 
-function posterizeScreenPrint(imageData, occupied) {
-  const w = imageData.width;
-  const h = imageData.height;
-  const src = imageData.data;
-  const out = new Uint8ClampedArray(src);
-
-  // Collect distinct colors + measure luminance range
-  const colorMap = new Map();
-  let lumaMin = 255;
-  let lumaMax = 0;
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      if (!occupied.has(`${x},${y}`)) continue;
-      const i = (y * w + x) * 4;
-      const key = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
-      const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2];
-      if (luma < lumaMin) lumaMin = luma;
-      if (luma > lumaMax) lumaMax = luma;
-      if (!colorMap.has(key)) {
-        colorMap.set(key, { r: src[i], g: src[i + 1], b: src[i + 2], luma });
-      }
-    }
-  }
-  const allColors = Array.from(colorMap.values()).sort((a, b) => a.luma - b.luma);
-  if (allColors.length < 2) return imageData;
-
-  // Pick 4 ink colors evenly across luminance-sorted palette
-  const inkCount = Math.min(4, allColors.length);
-  const inks = [];
-  for (let i = 0; i < inkCount; i += 1) {
-    const idx = Math.round((i / (inkCount - 1)) * (allColors.length - 1));
-    inks.push(allColors[idx]);
-  }
-
-  // Snap each pixel to nearest ink by luminance, normalized to actual range
-  const lumaRange = Math.max(1, lumaMax - lumaMin);
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      if (!occupied.has(`${x},${y}`)) continue;
-      const i = (y * w + x) * 4;
-      const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2];
-      const normalized = (luma - lumaMin) / lumaRange;
-      const band = Math.min(inkCount - 1, Math.floor(normalized * inkCount));
-      out[i] = inks[band].r;
-      out[i + 1] = inks[band].g;
-      out[i + 2] = inks[band].b;
-    }
-  }
-  return new ImageData(out, w, h);
-}
-
 function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
   const taken = used || new Set();
   let current = String(hex || "#000000").toUpperCase();
@@ -1421,14 +1370,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
           roleStep: activeRoleStep(),
           backgroundHex: state.useActiveBg && family === "warhol" ? selectedActiveHex() : null,
         }),
-        family === "warhol" ? Math.max(6, state.essentialTones) : Math.max(4, state.essentialTones),
+        family === "warhol" ? Math.max(4, state.essentialTones) : Math.max(4, state.essentialTones),
       );
       return result;
     });
     state.variantByFamily[family] = serialVariants[0];
     renderVariantPanel();
     const familyLabel = family === "warhol" ? "Pop Sheet" : "Serial Sheet";
-    setTopbarStatus(`${familyLabel} · 2x2 serial print · ${family === "warhol" ? Math.max(6, state.essentialTones) : Math.max(4, state.essentialTones)} tones${previousSubdiv !== 2 ? " · grid locked to 2x2" : ""}`);
+    setTopbarStatus(`${familyLabel} · 2x2 serial print · ${family === "warhol" ? Math.max(4, state.essentialTones) : Math.max(4, state.essentialTones)} tones${previousSubdiv !== 2 ? " · grid locked to 2x2" : ""}`);
     pulseStudio("surprise");
   }
 
@@ -1448,7 +1397,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const source = state.originalImageData;
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
     const panelCount = cols * rows;
-    const toneTarget = Math.max(6, state.essentialTones);
+    const toneTarget = Math.max(4, state.essentialTones);
 
     const panelResults = Array.from({ length: panelCount }, () => {
       const preset = createUniqueVariant("warhol", classified);
@@ -1468,7 +1417,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       };
     });
 
-    const occupiedSet = getOccupiedPixels(source);
     const tiles = panelResults.map((panel) => {
       const tile = new Uint8ClampedArray(source.data.length);
       for (let y = 0; y < source.height; y += 1) {
@@ -1493,7 +1441,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
           tile[idx + 3] = 255;
         }
       }
-      return posterizeScreenPrint(new ImageData(tile, source.width, source.height), occupiedSet);
+      return new ImageData(tile, source.width, source.height);
     });
 
     state.variantByFamily.warhol = panelResults[0]?.preset || null;
@@ -1581,7 +1529,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const pair = holdWorld ? ensureNoMinimalPreviewPair() : null;
     const backgroundHex = holdWorld ? pair.background : (state.useActiveBg && family === "warhol" ? selectedActiveHex() : null);
     const toneTarget = family === "warhol"
-      ? Math.max(6, noFieldToneTarget())
+      ? Math.max(4, noFieldToneTarget())
       : family === "acid"
         ? Math.max(5, noFieldToneTarget())
         : noFieldToneTarget();
@@ -1593,11 +1541,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       previousSubdiv = buildNoFieldSerial(classified, family, backgroundHex, toneTarget);
     } else {
       buildNoFieldSingle(classified, family, backgroundHex, toneTarget);
-    }
-
-    if (family === "warhol" && !serial) {
-      const spData = canvas.exportImageData();
-      canvas.applyImageData(posterizeScreenPrint(spData, canvas.getOccupied()));
     }
 
     if (fieldLevel >= 58) {
@@ -1656,7 +1599,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       : state.noFieldLastFamily.charAt(0).toUpperCase() + state.noFieldLastFamily.slice(1);
     const activeTab = state.activePresetTab;
     const toneTarget = activeTab === "warhol"
-      ? Math.max(6, noFieldToneTarget())
+      ? Math.max(4, noFieldToneTarget())
       : activeTab === "acid"
         ? Math.max(5, noFieldToneTarget())
         : noFieldToneTarget();
@@ -1743,7 +1686,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     };
     let toneTarget = maximal ? 3 : state.essentialTones;
     if (family === "warhol") {
-      toneTarget = Math.max(toneTarget, 6);
+      toneTarget = Math.max(toneTarget, 4);
     } else if (family === "acid") {
       toneTarget = Math.max(toneTarget, 5);
     }
@@ -1758,11 +1701,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
         const result = baseGridFn(...args);
         return collapsePresetResult(classified, result, toneTarget);
       });
-    }
-
-    if (family === "warhol" && canvas.subdivision <= 1) {
-      const spData = canvas.exportImageData();
-      canvas.applyImageData(posterizeScreenPrint(spData, canvas.getOccupied()));
     }
 
     const roleTag = presetOptions.roleStep === 4 && ["mono", "noir", "pastel"].includes(family) ? "Δ4 role lock" : `Δ${state.toneStep}`;
