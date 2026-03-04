@@ -60,7 +60,9 @@ function main() {
   copyFile(indexSrc, path.join(distDir, "404.html"));
 
   const routeAliases = [
+    "no-gallery",
     "tools/no-studio",
+    "tools/no-gallery",
     "tools/no-palette",
     "tools/no-generate",
     "tools/gif-lab",

@@ -15,15 +15,14 @@ import {
 import { createStudioTemplate } from "./no-studio-template.js";
 import { StudioCanvas } from "../lib/studio-canvas.js";
 import {
-  applyPreset, createGridPresetFn,
+  applyPreset,
   createRandomPreset, DEFAULT_TONE_STEP,
 } from "../lib/art-presets.js";
 import {
   hslToRgb, rgbToHsl, rgbToHex, hexToRgb,
   hexLuma, lerp, mixHex, distanceRgb,
 } from "../lib/color.js";
-import { deriveNoMinimalismPair, deriveRolePair } from "../lib/studio-signature.js";
-import { getStudioProgram, listStudioPrograms } from "../lib/studio-programs.js";
+import { deriveNoMinimalismPair } from "../lib/studio-signature.js";
 import { exportCanvasPng } from "../lib/download.js";
 import { encodeIndexedGif, quantizeImageDataToRgb332 } from "../lib/gif-encode.js";
 
@@ -81,11 +80,6 @@ async function loadSourceAsset(item) {
   };
 }
 
-function clampToneStep(value) {
-  const step = Math.round(Number(value) || DEFAULT_TONE_STEP);
-  return Math.max(1, Math.min(36, step));
-}
-
 function clampEssentialTones(value) {
   const tones = Math.round(Number(value) || 4);
   return Math.max(3, Math.min(8, tones));
@@ -98,6 +92,35 @@ function randomInt(min, max) {
 function pickOne(list) {
   if (!Array.isArray(list) || !list.length) return null;
   return list[randomInt(0, list.length - 1)];
+}
+
+function normalizeHexPalette(list) {
+  if (!Array.isArray(list)) return [];
+  const dedupe = new Set();
+  const out = [];
+  for (const value of list) {
+    const hex = String(value || "").trim().toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(hex) || dedupe.has(hex)) continue;
+    dedupe.add(hex);
+    out.push(hex);
+  }
+  return out;
+}
+
+function normalizeGalleryLabel(value, tokenId = 0) {
+  const base = String(value || "").trim() || `No-Studio #${Number(tokenId) || 0}`;
+  return base.replace(/\bsurprise\s+world\b/gi, "No-Curation");
+}
+
+function resolveGalleryPalette(item) {
+  const fromPayload = normalizeHexPalette(item?.palette || item?.paletteHexes || []);
+  if (fromPayload.length) return fromPayload;
+  const fallback = [];
+  const bg = String(item?.rolePair?.background || "").trim().toUpperCase();
+  const fg = String(item?.rolePair?.figure || "").trim().toUpperCase();
+  if (/^#[0-9A-F]{6}$/.test(bg)) fallback.push(bg);
+  if (/^#[0-9A-F]{6}$/.test(fg) && fg !== bg) fallback.push(fg);
+  return fallback;
 }
 
 function downloadBlob(blob, fileName) {
@@ -159,12 +182,13 @@ function collapsePresetResult(classified, presetResult, totalTones) {
   };
 }
 
-function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
+function ensureDistinctHex(hex, used, { floor = -1, forbidden = null } = {}) {
   const taken = used || new Set();
+  const blocked = forbidden instanceof Set ? forbidden : null;
   let current = String(hex || "#000000").toUpperCase();
   let attempts = 0;
   while (attempts < 16) {
-    if (!taken.has(current) && hexLuma(current) > floor) {
+    if (!taken.has(current) && (!blocked || !blocked.has(current)) && hexLuma(current) > floor) {
       taken.add(current);
       return current;
     }
@@ -175,22 +199,93 @@ function ensureDistinctHex(hex, used, { floor = -1 } = {}) {
   return current;
 }
 
-const SUBDIVISIONS = [
-  { value: 1, label: "1x1" },
-  { value: 2, label: "2x2" },
-  { value: 4, label: "4x4" },
-  { value: 6, label: "6x6" },
-  { value: 8, label: "8x8" },
-  { value: 12, label: "12" },
-  { value: 24, label: "24" },
-];
+const FAMILY_IDS = ["mono", "noir", "warhol", "acid", "pastel"];
+const FAMILY_LABELS = {
+  mono: "Mono",
+  noir: "Noir",
+  warhol: "Pop",
+  acid: "Acid",
+  pastel: "Pastel",
+};
+const BRAND_ROLE_BG = "#000000";
+const BRAND_ROLE_FG = "#040404";
+const FAMILY_PROFILES = {
+  mono: {
+    bgSat: [0.04, 0.16],
+    bgLight: [0.16, 0.34],
+    hueShift: 16,
+    sat: [0.03, 0.22],
+    light: [0.22, 0.76],
+    accentLift: 0.06,
+    quantMin: 3,
+    quantMax: 7,
+  },
+  noir: {
+    bgSat: [0.01, 0.08],
+    bgLight: [0.015, 0.07],
+    hueShift: 10,
+    sat: [0.01, 0.14],
+    light: [0.08, 0.34],
+    accentLift: 0.08,
+    quantMin: 3,
+    quantMax: 5,
+  },
+  warhol: {
+    bgSat: [0.62, 0.98],
+    bgLight: [0.28, 0.68],
+    hueShift: 210,
+    sat: [0.66, 1],
+    light: [0.2, 0.84],
+    accentLift: 0.08,
+    quantMin: 4,
+    quantMax: 6,
+  },
+  acid: {
+    bgSat: [0.78, 1],
+    bgLight: [0.14, 0.38],
+    hueShift: 260,
+    sat: [0.8, 1],
+    light: [0.14, 0.72],
+    accentLift: 0.1,
+    quantMin: 5,
+    quantMax: 7,
+  },
+  pastel: {
+    bgSat: [0.14, 0.36],
+    bgLight: [0.66, 0.92],
+    hueShift: 64,
+    sat: [0.08, 0.36],
+    light: [0.7, 0.94],
+    accentLift: 0.05,
+    quantMin: 4,
+    quantMax: 7,
+  },
+};
+
+function createDefaultGlobalModifiers() {
+  return {
+    toneCount: 5,
+    contrast: 62,
+    traitFocus: 54,
+    paletteDrift: 28,
+    grainAmount: 28,
+    grainTarget: "background",
+  };
+}
+
+function createDefaultFamilyModifiers() {
+  return {
+    mono: { hueDrift: 8, stepCompression: 56 },
+    noir: { shadowDepth: 72, accentGate: 38 },
+    warhol: { flatness: 70, panelDivergence: 62 },
+    acid: { clashAngle: 132, corrosion: 58 },
+    pastel: { powderSoftness: 66, airLift: 60 },
+  };
+}
 
 export function mountNoStudioTool(root, shellApi = {}) {
 
-  root.innerHTML = createStudioTemplate({
-    subdivisions: SUBDIVISIONS,
-    defaultToneStep: DEFAULT_TONE_STEP,
-  });
+  root.innerHTML = createStudioTemplate();
 
   // ── Elements ──────────────────────────────────────────────────
 
@@ -217,17 +312,25 @@ export function mountNoStudioTool(root, shellApi = {}) {
     hueValue: q("hue-value"), satValue: q("sat-value"), litValue: q("lit-value"),
     colorPreview: q("color-preview"), colorHex: q("color-hex"),
     paletteGrid: q("palette-grid"),
+    paletteCurationReadout: q("palette-curation-readout"),
+    curationMapActive: q("curation-map-active"),
+    curationClearMapping: q("curation-clear-mapping"),
+    curationApply: q("curation-apply"),
+    curationResetAll: q("curation-reset-all"),
     surpriseBtn: q("surprise-btn"),
     heroNoMinimal: q("hero-no-minimal"),
     heroRolePair: q("hero-role-pair"),
-    programRail: q("program-rail"),
     presetList: q("preset-list"),
-    presetGridLabel: q("preset-grid-label"),
     dockAdvanced: q("dock-advanced"),
-    toneStepSlider: q("tone-step-slider"),
-    toneStepValue: q("tone-step-value"),
-    minimalSlider: q("minimal-slider"),
-    minimalValue: q("minimal-value"),
+    globalToneCount: q("global-tone-count"),
+    globalToneCountValue: q("global-tone-count-value"),
+    globalContrast: q("global-contrast"),
+    globalContrastValue: q("global-contrast-value"),
+    globalTraitFocus: q("global-trait-focus"),
+    globalTraitFocusValue: q("global-trait-focus-value"),
+    globalPaletteDrift: q("global-palette-drift"),
+    globalPaletteDriftValue: q("global-palette-drift-value"),
+    familyModifiersPanel: q("family-modifiers-panel"),
     noMinimalModeRail: q("no-minimal-mode-rail"),
     activeBgToggle: q("active-bg-toggle"),
     noiseTargetRail: q("noise-target-rail"),
@@ -236,7 +339,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
     applyNoise: q("apply-noise"),
     exportPng: q("export-png"),
     exportGif: q("export-gif"),
-    saveGallery: q("save-gallery"),
+    saveGalleryPng: q("save-gallery-png"),
+    saveGalleryGif: q("save-gallery-gif"),
+    gallerySignature: q("gallery-signature"),
+    openGalleryLink: q("open-gallery-link"),
     exportReset: q("export-reset"),
     galleryRefresh: q("gallery-refresh"),
     galleryList: q("gallery-list"),
@@ -262,21 +368,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
     galleryItems: [],
     galleryLoading: false,
     gallerySaving: false,
+    gallerySavingKind: null,
     galleryMessage: "",
     activeTool: "pointer",
     activePresetTab: "mono",
-    noFieldCore: "auto",
-    toneStep: DEFAULT_TONE_STEP,
-    essentialTones: 4,
     noMinimalDeltaMode: "exact",
     useActiveBg: false,
-    activeTheory: "contour",
-    activeDitherEngine: "quiet",
     activeNoiseTarget: "background",
     noiseAmount: 28,
     noisePass: 0,
     lastReductionMode: "none",
-    lastProgramId: "",
+    rerollMode: "world",
+    globalModifiers: createDefaultGlobalModifiers(),
+    familyModifiers: createDefaultFamilyModifiers(),
     variantByFamily: {
       mono: null,
       noir: null,
@@ -292,21 +396,21 @@ export function mountNoStudioTool(root, shellApi = {}) {
     originalOccupied: null,
     sourceClassifiedPalette: null,
     sourcePaletteHexes: [],
+    sourceRoleByHex: new Map(),
+    curatedPaletteMap: {},
+    curationSourceHex: null,
     ditherPalette: [
       { r: 255, g: 255, b: 255 },
       { r: 0, g: 0, b: 0 },
     ],
-    reliefFieldSeed: 0,
-    userSubdivision: 1,
     activeColor: { h: 0, s: 0, l: 100 },
     activeColorHex: "#FFFFFF",
+    gallerySignature: "",
     noMinimalPreviewPair: null,
-    noFieldIntensity: 62,
-    noFieldField: 54,
-    noFieldFinish: 28,
-    noFieldSerial: false,
     noFieldLastFamily: "noir",
     popSheetLayout: "2x2",
+    isSheetMode: false,
+    traitRecastNonce: 0,
   };
 
   // ── Session persistence ──────────────────────────────────────
@@ -320,17 +424,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
         activePresetTab: state.activePresetTab,
         activeColor: state.activeColor,
         activeColorHex: state.activeColorHex,
-        userSubdivision: state.userSubdivision,
-        toneStep: state.toneStep,
-        essentialTones: state.essentialTones,
         noMinimalDeltaMode: state.noMinimalDeltaMode,
         useActiveBg: state.useActiveBg,
-        activeNoiseTarget: state.activeNoiseTarget,
-        noiseAmount: state.noiseAmount,
-        noFieldIntensity: state.noFieldIntensity,
-        noFieldField: state.noFieldField,
-        noFieldFinish: state.noFieldFinish,
+        globalModifiers: state.globalModifiers,
+        familyModifiers: state.familyModifiers,
         popSheetLayout: state.popSheetLayout,
+        gallerySignature: normalizeSignatureHandle(els.gallerySignature?.value || state.gallerySignature || ""),
+        curatedPaletteMap: state.curatedPaletteMap,
+        curationSourceHex: state.curationSourceHex,
       };
       if (state.selected && canvas) {
         const imageData = canvas.exportImageData();
@@ -448,7 +549,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!signature || state.sessionSignatures.has(signature)) return;
     state.sessionSignatures.add(signature);
     state.sessionSignatureOrder.push(signature);
-    while (state.sessionSignatureOrder.length > 96) {
+    while (state.sessionSignatureOrder.length > 2048) {
       const old = state.sessionSignatureOrder.shift();
       if (old) state.sessionSignatures.delete(old);
     }
@@ -458,7 +559,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!signature || state.outputSignatures.has(signature)) return false;
     state.outputSignatures.add(signature);
     state.outputSignatureOrder.push(signature);
-    while (state.outputSignatureOrder.length > 96) {
+    while (state.outputSignatureOrder.length > 512) {
       const old = state.outputSignatureOrder.shift();
       if (old) state.outputSignatures.delete(old);
     }
@@ -481,13 +582,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
       hash >>> 0,
       state.activePresetTab,
       state.lastReductionMode,
-      state.activeDitherEngine,
-      state.activeTheory,
       state.useActiveBg ? 1 : 0,
       state.noMinimalDeltaMode,
-      state.toneStep,
-      state.essentialTones,
-      canvas.subdivision,
+      state.globalModifiers.toneCount,
+      state.globalModifiers.contrast,
+      state.globalModifiers.traitFocus,
+      state.globalModifiers.paletteDrift,
+      state.isSheetMode ? state.popSheetLayout : "1x1",
+      JSON.stringify(state.familyModifiers[state.activePresetTab] || {}),
       canvas.getCurrentPalette().join(","),
     ].join(":");
   }
@@ -496,19 +598,24 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!preset) return null;
     const parts = [
       family,
-      Math.round(Number(preset.baseHue || 0)),
-      Math.round(Number((preset.bgLightness ?? preset.baseLightness ?? 0) * 100)),
-      Math.round(Number((preset.bgSaturation ?? preset.baseSaturation ?? 0) * 100)),
-      Math.round(Number((preset.colorSaturation ?? preset.accentSaturationLift ?? 0) * 100)),
-      Math.round(Number(preset.hueSwing || preset.accentHueShift || 0)),
-      Math.round(Number((preset.hueDrift || preset.bodyPulse || 0) * 10)),
-      Math.round(Number((preset.curve || 0) * 100)),
-      Math.round(Number((preset.contrast || 0) * 100)),
-      Math.round(Number((preset.phase || preset.huePhase || preset.driftPhase || 0) * 100)),
+      Math.round(Number(preset.baseHue || 0) * 10),
+      Math.round(Number((preset.bgLightness ?? preset.baseLightness ?? 0) * 1000)),
+      Math.round(Number((preset.bgSaturation ?? preset.baseSaturation ?? 0) * 1000)),
+      Math.round(Number((preset.colorSaturation ?? preset.accentSaturationLift ?? 0) * 1000)),
+      Math.round(Number((preset.hueSwing ?? preset.accentHueShift ?? 0) * 100)),
+      Math.round(Number((preset.hueDrift ?? preset.bodyPulse ?? 0) * 100)),
+      Math.round(Number((preset.curve || 0) * 1000)),
+      Math.round(Number((preset.contrast || 0) * 1000)),
+      Math.round(Number((preset.phase ?? preset.huePhase ?? preset.driftPhase ?? 0) * 1000)),
+      Math.round(Number((preset.variantPhase ?? 0) * 1000)),
+      Math.round(Number((preset.depthLayers ?? 0) * 100)),
+      Math.round(Number((preset.chiaroscuro ?? 0) * 1000)),
+      Math.round(Number((preset.voidBias ?? 0) * 1000)),
       String(preset.harmony || ""),
-      state.toneStep,
-      state.essentialTones,
-      canvas.subdivision,
+      state.globalModifiers.toneCount,
+      state.globalModifiers.contrast,
+      state.globalModifiers.traitFocus,
+      state.globalModifiers.paletteDrift,
     ];
     return parts.join(":");
   }
@@ -517,7 +624,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const userAnchorHex = selectedActiveHex();
     const excludeActiveHex = family !== "warhol";
     let fallback = null;
-    for (let i = 0; i < 24; i += 1) {
+    for (let i = 0; i < 96; i += 1) {
       const preset = createRandomPreset(family, {
         activeHex: userAnchorHex,
         sourcePalette,
@@ -536,28 +643,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return fallback;
   }
 
-  function setSubdivisionValue(value, { userDriven = false } = {}) {
-    canvas.setSubdivision(value);
-    topbar.querySelectorAll("[data-subdiv]").forEach((b) => b.classList.remove("is-active"));
-    const active = topbar.querySelector(`[data-subdiv="${value}"]`);
-    if (active) active.classList.add("is-active");
-    const sub = SUBDIVISIONS.find((s) => s.value === value);
-    els.presetGridLabel.textContent = `(grid: ${sub ? sub.label : value})`;
-    if (userDriven) {
-      state.userSubdivision = value;
-    }
-  }
-
   function setActivePresetTab(tabId) {
     state.activePresetTab = tabId;
-    if (tabId === "mono" || tabId === "noir" || tabId === "warhol" || tabId === "acid" || tabId === "pastel") {
-      state.noFieldCore = tabId;
-    }
+    state.noFieldLastFamily = tabId;
+    state.isSheetMode = false;
+    canvas.setSubdivision(1);
     root.querySelectorAll(".preset-tab").forEach((t) => t.classList.toggle("is-active", t.dataset.presetTab === tabId));
     renderPresetList();
-    const label = tabId === "warhol"
-      ? "Pop"
-      : tabId.charAt(0).toUpperCase() + tabId.slice(1);
+    const label = FAMILY_LABELS[tabId] || "Studio";
     const kicker = root.querySelector("[data-role=\"deck-family-kicker\"]");
     if (kicker) kicker.textContent = label;
     setTopbarStatus(`${label} armed · original-source rerender`);
@@ -576,6 +669,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     renderHeroRolePair();
     canvas.setActiveColorHex(normalizedHex);
     renderPresetList();
+    updatePaletteGrid();
   }
 
   function onColorSliderInput() {
@@ -588,6 +682,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     renderHeroRolePair();
     canvas.setActiveColor(rgb.r, rgb.g, rgb.b);
     renderPresetList();
+    updatePaletteGrid();
   }
 
   function syncColorUI() {
@@ -617,37 +712,111 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   syncColorUI();
 
-  function syncToneStepUI() {
-    state.toneStep = clampToneStep(state.toneStep);
-    els.toneStepSlider.value = String(state.toneStep);
-    els.toneStepValue.textContent = String(state.toneStep);
-    setTopbarStatus(`Relief Δ${state.toneStep} · ${state.essentialTones} tones · ${canvas.subdivision}x${canvas.subdivision} grid`);
+  function clampPercent(value) {
+    return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
   }
 
-  els.toneStepSlider.addEventListener("input", () => {
-    state.toneStep = clampToneStep(els.toneStepSlider.value);
-    syncToneStepUI();
-  });
+  function syncGlobalModifierUI() {
+    state.globalModifiers.toneCount = Math.max(2, Math.min(8, Math.round(Number(state.globalModifiers.toneCount) || 5)));
+    state.globalModifiers.contrast = clampPercent(state.globalModifiers.contrast);
+    state.globalModifiers.traitFocus = clampPercent(state.globalModifiers.traitFocus);
+    state.globalModifiers.paletteDrift = clampPercent(state.globalModifiers.paletteDrift);
+    state.globalModifiers.grainAmount = clampPercent(state.globalModifiers.grainAmount);
+    state.globalModifiers.grainTarget = state.globalModifiers.grainTarget || "background";
+    state.noiseAmount = state.globalModifiers.grainAmount;
+    state.activeNoiseTarget = state.globalModifiers.grainTarget;
 
-  function syncMinimalUI() {
-    state.essentialTones = clampEssentialTones(state.essentialTones);
-    els.minimalSlider.value = String(state.essentialTones);
-    els.minimalValue.textContent = String(state.essentialTones);
-    setTopbarStatus(`Relief Δ${state.toneStep} · ${state.essentialTones} tones · ${canvas.subdivision}x${canvas.subdivision} grid`);
+    if (els.globalToneCount) els.globalToneCount.value = String(state.globalModifiers.toneCount);
+    if (els.globalToneCountValue) els.globalToneCountValue.textContent = String(state.globalModifiers.toneCount);
+    if (els.globalContrast) els.globalContrast.value = String(state.globalModifiers.contrast);
+    if (els.globalContrastValue) els.globalContrastValue.textContent = `${state.globalModifiers.contrast}%`;
+    if (els.globalTraitFocus) els.globalTraitFocus.value = String(state.globalModifiers.traitFocus);
+    if (els.globalTraitFocusValue) els.globalTraitFocusValue.textContent = `${state.globalModifiers.traitFocus}%`;
+    if (els.globalPaletteDrift) els.globalPaletteDrift.value = String(state.globalModifiers.paletteDrift);
+    if (els.globalPaletteDriftValue) els.globalPaletteDriftValue.textContent = `${state.globalModifiers.paletteDrift}%`;
+    if (els.noiseAmount) els.noiseAmount.value = String(state.globalModifiers.grainAmount);
+    if (els.noiseAmountValue) els.noiseAmountValue.textContent = `${state.globalModifiers.grainAmount}%`;
   }
 
-  els.minimalSlider.addEventListener("input", () => {
-    state.essentialTones = clampEssentialTones(els.minimalSlider.value);
-    syncMinimalUI();
-  });
+  function currentFamilyModifiers() {
+    return state.familyModifiers[state.activePresetTab] || {};
+  }
 
-  syncToneStepUI();
-  syncMinimalUI();
+  function renderFamilyModifierPanel() {
+    if (!els.familyModifiersPanel) return;
+    const family = state.activePresetTab;
+    const values = currentFamilyModifiers();
+    const blocks = {
+      mono: [
+        { key: "hueDrift", label: "Hue Drift", min: 0, max: 20, unit: "°", help: "Controls monochrome hue wandering." },
+        { key: "stepCompression", label: "Step Compression", min: 0, max: 100, unit: "%", help: "Quantizes tonal ladder for harder mono bands." },
+      ],
+      noir: [
+        { key: "shadowDepth", label: "Shadow Depth", min: 0, max: 100, unit: "%", help: "Pushes black floor density and concealment." },
+        { key: "accentGate", label: "Accent Gate", min: 0, max: 100, unit: "%", help: "Limits bright accents to fewer trait regions." },
+      ],
+      warhol: [
+        { key: "flatness", label: "Flatness", min: 0, max: 100, unit: "%", help: "Flattens light bands for graphic panel impact." },
+        { key: "panelDivergence", label: "Panel Divergence", min: 0, max: 100, unit: "%", help: "Separates pop sheet panels with stronger palette splits." },
+      ],
+      acid: [
+        { key: "clashAngle", label: "Clash Angle", min: 0, max: 180, unit: "°", help: "Controls hue conflict angle for acid tension." },
+        { key: "corrosion", label: "Corrosion", min: 0, max: 100, unit: "%", help: "Adds synthetic separation and harsh local contrast." },
+      ],
+      pastel: [
+        { key: "powderSoftness", label: "Powder Softness", min: 0, max: 100, unit: "%", help: "Softens saturation and edge contrast." },
+        { key: "airLift", label: "Air Lift", min: 0, max: 100, unit: "%", help: "Raises lightness for airy pastel atmosphere." },
+      ],
+    }[family] || [];
+
+    els.familyModifiersPanel.innerHTML = blocks.map((item) => {
+      const value = Number(values[item.key] ?? item.min);
+      return `
+        <label class="no-field-meter">
+          <span class="no-field-meter-label">${escapeHtml(item.label)}</span>
+          <input type="range" class="color-slider" data-action="set-family-modifier" data-key="${escapeHtml(item.key)}" min="${item.min}" max="${item.max}" value="${value}" />
+          <span class="color-slider-value">${value}${escapeHtml(item.unit)}</span>
+          <span class="no-field-meter-hint">${escapeHtml(item.help)}</span>
+        </label>
+      `;
+    }).join("");
+  }
+
+  if (els.globalToneCount) {
+    els.globalToneCount.addEventListener("input", () => {
+      state.globalModifiers.toneCount = Math.max(2, Math.min(8, Math.round(Number(els.globalToneCount.value) || 5)));
+      syncGlobalModifierUI();
+      scheduleVariantPanelRender();
+    });
+  }
+  if (els.globalContrast) {
+    els.globalContrast.addEventListener("input", () => {
+      state.globalModifiers.contrast = clampPercent(els.globalContrast.value);
+      syncGlobalModifierUI();
+      scheduleVariantPanelRender();
+    });
+  }
+  if (els.globalTraitFocus) {
+    els.globalTraitFocus.addEventListener("input", () => {
+      state.globalModifiers.traitFocus = clampPercent(els.globalTraitFocus.value);
+      syncGlobalModifierUI();
+      scheduleVariantPanelRender();
+    });
+  }
+  if (els.globalPaletteDrift) {
+    els.globalPaletteDrift.addEventListener("input", () => {
+      state.globalModifiers.paletteDrift = clampPercent(els.globalPaletteDrift.value);
+      syncGlobalModifierUI();
+      scheduleVariantPanelRender();
+    });
+  }
+
+  syncGlobalModifierUI();
 
   function syncActiveBgToggle() {
     if (!els.activeBgToggle) return;
     els.activeBgToggle.classList.toggle("is-active", state.useActiveBg);
-    els.activeBgToggle.textContent = `Active BG for Pop · ${state.useActiveBg ? "On" : "Off"}`;
+    els.activeBgToggle.textContent = `Use Active Color As Background · ${state.useActiveBg ? "On" : "Off"}`;
   }
 
   function renderHeroRolePair() {
@@ -673,7 +842,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   els.activeBgToggle?.addEventListener("click", () => {
     state.useActiveBg = !state.useActiveBg;
     syncActiveBgToggle();
-    setTopbarStatus(state.useActiveBg ? "Pop uses the active background" : "Pop uses a machine-picked background");
+    setTopbarStatus(state.useActiveBg ? "All families use active color as background anchor" : "Families use machine-picked background anchors");
   });
 
   syncActiveBgToggle();
@@ -696,12 +865,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const button = event.target.closest("[data-noise-target]");
     if (!button) return;
     state.activeNoiseTarget = button.dataset.noiseTarget || "background";
+    state.globalModifiers.grainTarget = state.activeNoiseTarget;
     renderNoiseTargetRail();
     setTopbarStatus(`Noise target ${state.activeNoiseTarget}`);
   });
 
   els.noiseAmount?.addEventListener("input", () => {
     state.noiseAmount = Math.max(0, Math.min(100, Number(els.noiseAmount.value) || 0));
+    state.globalModifiers.grainAmount = state.noiseAmount;
     if (els.noiseAmountValue) {
       els.noiseAmountValue.textContent = `${state.noiseAmount}%`;
     }
@@ -713,24 +884,161 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   // ── Palette grid ──────────────────────────────────────────────
 
+  function sourceRoleForHex(hex) {
+    const key = String(hex || "").trim().toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(key)) return "body";
+    return state.sourceRoleByHex.get(key) || "body";
+  }
+
+  function renderPaletteCurationReadout() {
+    if (!els.paletteCurationReadout) return;
+    const selected = String(state.curationSourceHex || "").toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(selected)) {
+      els.paletteCurationReadout.textContent = "Pick a source swatch, then map it to your active color.";
+      return;
+    }
+    const role = sourceRoleForHex(selected);
+    const mapped = String(state.curatedPaletteMap[selected] || "").toUpperCase();
+    if (/^#[0-9A-F]{6}$/.test(mapped)) {
+      els.paletteCurationReadout.textContent = `${selected} (${role}) → ${mapped}`;
+      return;
+    }
+    els.paletteCurationReadout.textContent = `${selected} (${role}) is not mapped yet`;
+  }
+
   function updatePaletteGrid() {
     const colors = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
-    els.paletteGrid.innerHTML = colors.map((hex) =>
-      `<button class="palette-swatch" data-hex="${escapeHtml(hex)}" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)}"></button>`
-    ).join("") || '<span style="font-size:11px;color:var(--text-dim)">Select a punk</span>';
+    const selectedSource = String(state.curationSourceHex || "").toUpperCase();
+    const activeHex = selectedActiveHex();
+    els.paletteGrid.innerHTML = colors.map((hex) => {
+      const sourceHex = String(hex || "").toUpperCase();
+      const mappedHex = String(state.curatedPaletteMap[sourceHex] || "").toUpperCase();
+      const role = sourceRoleForHex(sourceHex);
+      const isMapped = /^#[0-9A-F]{6}$/.test(mappedHex);
+      const isSourceSelected = sourceHex === selectedSource;
+      const isActive = sourceHex === activeHex;
+      const classes = [
+        "palette-swatch",
+        isMapped ? "is-mapped" : "",
+        isSourceSelected ? "is-source-selected" : "",
+        isActive ? "is-active" : "",
+      ].filter(Boolean).join(" ");
+      const style = isMapped && mappedHex !== sourceHex
+        ? `background:linear-gradient(135deg, ${escapeHtml(sourceHex)} 0%, ${escapeHtml(sourceHex)} 50%, ${escapeHtml(mappedHex)} 50%, ${escapeHtml(mappedHex)} 100%);`
+        : `background:${escapeHtml(sourceHex)};`;
+      const title = isMapped
+        ? `${sourceHex} (${role}) → ${mappedHex}`
+        : `${sourceHex} (${role})`;
+      return `<button class="${classes}" data-hex="${escapeHtml(sourceHex)}" style="${style}" title="${escapeHtml(title)}"></button>`;
+    }).join("") || '<span style="font-size:11px;color:var(--text-dim)">Select a punk</span>';
+    renderPaletteCurationReadout();
   }
 
   els.paletteGrid.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-hex]");
     if (!btn) return;
     const pickedHex = String(btn.dataset.hex || "").toUpperCase();
+    state.curationSourceHex = pickedHex;
     setActiveColorFromHex(pickedHex);
     setTopbarStatus(`Active color ${pickedHex} armed`);
 
     if (!state.useActiveBg) {
       renderHeroRolePair();
     }
+    updatePaletteGrid();
+    persistSession();
   });
+
+  function mapActiveColorToSelectedSource() {
+    const sourceHex = String(state.curationSourceHex || "").toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(sourceHex)) {
+      setTopbarStatus("Select a source palette swatch first");
+      return;
+    }
+    const role = sourceRoleForHex(sourceHex);
+    if (role === "background" || role === "outline") {
+      setTopbarStatus("Role pair is locked. Map non-role colors only.");
+      return;
+    }
+    const targetHex = selectedActiveHex();
+    state.curatedPaletteMap[sourceHex] = targetHex;
+    updatePaletteGrid();
+    setTopbarStatus(`Mapped ${sourceHex} → ${targetHex}`);
+    persistSession();
+  }
+
+  function clearSelectedPaletteMapping() {
+    const sourceHex = String(state.curationSourceHex || "").toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(sourceHex)) {
+      setTopbarStatus("Select a source palette swatch first");
+      return;
+    }
+    delete state.curatedPaletteMap[sourceHex];
+    updatePaletteGrid();
+    setTopbarStatus(`Cleared mapping for ${sourceHex}`);
+    persistSession();
+  }
+
+  function resetPaletteCuration() {
+    state.curatedPaletteMap = {};
+    state.curationSourceHex = null;
+    updatePaletteGrid();
+    setTopbarStatus("Curated palette reset");
+    persistSession();
+  }
+
+  function applyCuratedPaletteCast() {
+    if (!state.selected) {
+      setServerStatus("Select a NoPunk first.");
+      return;
+    }
+    const family = activeCreativeFamily();
+    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
+    const variant = state.variantByFamily[family] || createUniqueVariant(family, classified);
+    const backgroundHex = resolveBackgroundForReroll("world", family);
+    const result = buildFamilyResult(classified, family, {
+      preset: variant,
+      backgroundHex,
+      traitPhase: state.traitRecastNonce,
+      panelIndex: 0,
+      panelCount: 1,
+    });
+    const nextMapping = { ...(result.mapping || {}) };
+    const floor = hexLuma(result.roles?.outline || "#040404");
+    const used = new Set(Object.values(nextMapping).map((hex) => String(hex || "").toUpperCase()));
+    used.add(String(result.roles?.background || "").toUpperCase());
+    used.add(String(result.roles?.outline || "").toUpperCase());
+
+    for (const [sourceHexRaw, targetHexRaw] of Object.entries(state.curatedPaletteMap || {})) {
+      const sourceHex = String(sourceHexRaw || "").toUpperCase();
+      const targetHex = String(targetHexRaw || "").toUpperCase();
+      if (!/^#[0-9A-F]{6}$/.test(sourceHex) || !/^#[0-9A-F]{6}$/.test(targetHex)) continue;
+      const role = sourceRoleForHex(sourceHex);
+      if (role === "background" || role === "outline") continue;
+      let safeHex = targetHex;
+      if (hexLuma(safeHex) <= floor) {
+        safeHex = mixHex(safeHex, "#FFFFFF", 0.18);
+      }
+      nextMapping[sourceHex] = ensureDistinctHex(safeHex, used, { floor });
+    }
+
+    state.variantByFamily[family] = variant;
+    syncHeroPairFromRoles(result.roles, activeRoleStep());
+    canvas.applyColorMapping(nextMapping, result.roles);
+    state.noFieldLastFamily = family;
+    state.lastReductionMode = "none";
+    renderHeroRolePair();
+    renderVariantPanel();
+    updatePaletteGrid();
+    setTopbarStatus(`Curated Cast · ${FAMILY_LABELS[family] || "Studio"} · original-source rerender`);
+    pulseStudio("variant");
+    persistSession();
+  }
+
+  els.curationMapActive?.addEventListener("click", mapActiveColorToSelectedSource);
+  els.curationClearMapping?.addEventListener("click", clearSelectedPaletteMapping);
+  els.curationResetAll?.addEventListener("click", resetPaletteCuration);
+  els.curationApply?.addEventListener("click", applyCuratedPaletteCast);
 
   // ── Tool selection ────────────────────────────────────────────
 
@@ -795,18 +1103,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.statusZoom.textContent = `${Math.round(canvas.zoom * 100)}%`;
   }
 
-  // ── Subdivision (the creative axis) ───────────────────────────
-
-  const topbar = root.querySelector(".studio-topbar");
-  topbar.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-subdiv]");
-    if (!btn) return;
-    const value = Number(btn.dataset.subdiv);
-    setSubdivisionValue(value, { userDriven: true });
-    const sub = SUBDIVISIONS.find((s) => s.value === value);
-    setTopbarStatus(`Relief Δ${state.toneStep} · ${sub ? sub.label : value} grid`);
-  });
-
   root.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-preset-tab]");
     if (!tab) return;
@@ -847,13 +1143,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (key === "?" || (e.shiftKey && key === "/")) { toggleShortcutHints(); return; }
     if (key === "escape" && shortcutOverlay) { hideShortcutHints(); return; }
 
-    // 1-7 for subdivision
-    const n = parseInt(key);
-    if (n >= 1 && n <= 7 && SUBDIVISIONS[n - 1]) {
-      const sub = SUBDIVISIONS[n - 1];
-      setSubdivisionValue(sub.value, { userDriven: true });
-      setTopbarStatus(`Relief Δ${state.toneStep} · ${sub.label} grid`);
-    }
   }
 
   function selectTool(tool) {
@@ -889,7 +1178,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
           <div class="shortcut-group">
             <div class="shortcut-group-title">Canvas</div>
             <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd><span>Zoom In / Out</span></div>
-            <div class="shortcut-row"><kbd>1</kbd> – <kbd>7</kbd><span>Grid Subdivision</span></div>
             <div class="shortcut-row"><kbd>Z</kbd><span>Undo</span></div>
             <div class="shortcut-row"><kbd>Y</kbd><span>Redo</span></div>
             <div class="shortcut-row"><kbd>Cmd+Z</kbd><span>Undo</span></div>
@@ -918,9 +1206,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   document.addEventListener("keydown", onKeyDown);
 
-  // ── Presets — Grid-Aware ──────────────────────────────────────
-  // When grid > 1x1, presets create multi-panel compositions.
-  // Each block gets a rotated/shifted version of the preset.
+  // ── Family Engines ─────────────────────────────────────────────
 
   function activeCreativeFamily() {
     if (state.activePresetTab === "noir") return "noir";
@@ -931,9 +1217,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   }
 
   function activeRoleStep() {
-    const family = activeCreativeFamily();
-    if (family === "mono" || family === "noir" || family === "pastel") return 4;
-    return state.toneStep;
+    return 4;
   }
 
   function selectedActiveHex() {
@@ -943,32 +1227,64 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return rgbToHex(rgb.r, rgb.g, rgb.b);
   }
 
-  function originalAnchorHex(sourcePalette) {
-    const source = Array.isArray(sourcePalette) ? sourcePalette : [];
-    const activeHex = selectedActiveHex();
-    const sourceHexes = new Set(source.map((entry) => String(entry?.hex || "").toUpperCase()));
-    if (sourceHexes.has(activeHex)) return activeHex;
-
-    const ranked = source
-      .filter((entry) => entry && entry.role !== "background" && entry.role !== "outline")
-      .slice()
-      .sort((a, b) => {
-        const aAccent = a.role === "accent" ? 1 : 0;
-        const bAccent = b.role === "accent" ? 1 : 0;
-        if (aAccent !== bAccent) return bAccent - aAccent;
-        return hexLuma(String(b.hex || "#000000")) - hexLuma(String(a.hex || "#000000"));
-      });
-
-    if (ranked[0]?.hex) return String(ranked[0].hex).toUpperCase();
-    if (source[0]?.hex) return String(source[0].hex).toUpperCase();
-    return activeHex || "#808080";
-  }
-
   function activeAnchorHex() {
     const raw = String(state.activeColorHex || els.colorHex.value || "").trim().toUpperCase();
     if (/^#[0-9A-F]{6}$/.test(raw)) return raw;
     const palette = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
     return palette[0] || "#808080";
+  }
+
+  function getFamilyProfile(family) {
+    return FAMILY_PROFILES[family] || FAMILY_PROFILES.mono;
+  }
+
+  function pickFamilySourceAnchor(family = activeCreativeFamily()) {
+    const source = Array.isArray(state.sourceClassifiedPalette) ? state.sourceClassifiedPalette : [];
+    const ranked = source
+      .filter((entry) => entry && entry.role !== "background" && entry.role !== "outline")
+      .slice()
+      .sort((a, b) => hexLuma(String(a.hex || BRAND_ROLE_BG)) - hexLuma(String(b.hex || BRAND_ROLE_BG)));
+    if (!ranked.length) {
+      return activeAnchorHex();
+    }
+    if (family === "noir" || family === "mono" || family === "acid") {
+      return String(ranked[0].hex || activeAnchorHex()).toUpperCase();
+    }
+    if (family === "pastel") {
+      return String(ranked[ranked.length - 1].hex || activeAnchorHex()).toUpperCase();
+    }
+    const midIndex = Math.floor((ranked.length - 1) * 0.5);
+    return String(ranked[midIndex]?.hex || activeAnchorHex()).toUpperCase();
+  }
+
+  function familyWorldBackgroundHex(family = activeCreativeFamily()) {
+    const profile = getFamilyProfile(family);
+    const anchorHex = pickFamilySourceAnchor(family);
+    const anchorRgb = hexToRgb(anchorHex);
+    const anchorHsl = rgbToHsl(anchorRgb.r, anchorRgb.g, anchorRgb.b);
+    const unit = Math.random();
+
+    const sat = Math.max(0, Math.min(1, profile.bgSat[0] + ((profile.bgSat[1] - profile.bgSat[0]) * unit)));
+    const light = Math.max(0, Math.min(1, profile.bgLight[0] + ((profile.bgLight[1] - profile.bgLight[0]) * (1 - unit))));
+
+    let hue = anchorHsl.h;
+    if (family === "warhol") {
+      const harmonies = [120, 180, 240, 300];
+      hue = (anchorHsl.h + (pickOne(harmonies) || 180) + randomInt(-22, 22) + 720) % 360;
+    } else if (family === "acid") {
+      const polarity = Math.random() > 0.5 ? 1 : -1;
+      hue = (anchorHsl.h + (profile.hueShift * polarity) + randomInt(-16, 16) + 720) % 360;
+    } else if (family === "pastel") {
+      hue = (anchorHsl.h + randomInt(-profile.hueShift, profile.hueShift) + 360) % 360;
+    } else if (family === "mono") {
+      hue = (anchorHsl.h + randomInt(-Math.round(profile.hueShift * 0.4), Math.round(profile.hueShift * 0.4)) + 360) % 360;
+    } else {
+      hue = (anchorHsl.h + randomInt(-profile.hueShift, profile.hueShift) + 360) % 360;
+    }
+
+    const rgb = hslToRgb(hue, sat, light);
+    const rolePair = deriveNoMinimalismPair(rgbToHex(rgb.r, rgb.g, rgb.b), state.noMinimalDeltaMode);
+    return rolePair.background;
   }
 
   function randomNoMinimalBackgroundHex() {
@@ -987,9 +1303,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const anchorHex = String(picked?.hex || activeAnchorHex() || "#808080").toUpperCase();
     const anchorRgb = hexToRgb(anchorHex);
     const anchorHsl = rgbToHsl(anchorRgb.r, anchorRgb.g, anchorRgb.b);
-    const hue = (anchorHsl.h + randomInt(-90, 90) + 360) % 360;
-    const sat = Math.max(0.18, Math.min(0.92, (anchorHsl.s * 0.9) + ((Math.random() * 0.36) - 0.08)));
-    const light = Math.max(0.12, Math.min(0.72, (anchorHsl.l * 0.72) + ((Math.random() * 0.34) - 0.08)));
+    const hue = (anchorHsl.h + randomInt(-84, 84) + 360) % 360;
+    const sat = Math.max(0.18, Math.min(0.88, (anchorHsl.s * 0.85) + ((Math.random() * 0.3) - 0.06)));
+    const light = Math.max(0.12, Math.min(0.66, (anchorHsl.l * 0.65) + ((Math.random() * 0.26) - 0.06)));
     const rgb = hslToRgb(hue, sat, light);
     return rgbToHex(rgb.r, rgb.g, rgb.b);
   }
@@ -1023,6 +1339,57 @@ export function mountNoStudioTool(root, shellApi = {}) {
     };
   }
 
+  function buildSourceForbiddenSet(classified = []) {
+    return new Set((classified || []).map((entry) => String(entry?.hex || "").toUpperCase()));
+  }
+
+  function deriveValidRolePair(backgroundHex, forbiddenSet) {
+    const blocked = forbiddenSet instanceof Set ? forbiddenSet : new Set();
+    let current = String(backgroundHex || "#000000").toUpperCase();
+    for (let i = 0; i < 32; i += 1) {
+      const pair = deriveNoMinimalismPair(current, "exact");
+      if (!blocked.has(pair.background) && !blocked.has(pair.figure)) {
+        return pair;
+      }
+      const rgb = hexToRgb(pair.background);
+      const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
+      const next = hslToRgb(
+        (hsl.h + 17 + (i * 3)) % 360,
+        Math.max(0.04, Math.min(0.98, hsl.s + ((i % 2 === 0) ? 0.04 : -0.02))),
+        Math.max(0.06, Math.min(0.9, hsl.l + ((i % 2 === 0) ? 0.05 : -0.03))),
+      );
+      current = rgbToHex(next.r, next.g, next.b);
+    }
+    return deriveNoMinimalismPair(current, "exact");
+  }
+
+  function enforceRolePairRules(result, classified, fallbackBgHex, family) {
+    const mapping = { ...(result?.mapping || {}) };
+    const roles = result?.roles || {};
+    const sourceForbidden = buildSourceForbiddenSet(classified);
+    let backgroundHex = String(
+      roles.background
+        || fallbackBgHex
+        || familyWorldBackgroundHex(family)
+        || "#000000",
+    ).toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(backgroundHex)) {
+      backgroundHex = familyWorldBackgroundHex(family);
+    }
+    const pair = deriveValidRolePair(backgroundHex, sourceForbidden);
+    for (const entry of (classified || [])) {
+      if (entry.role === "background") mapping[entry.hex] = pair.background;
+      if (entry.role === "outline") mapping[entry.hex] = pair.figure;
+    }
+    return {
+      mapping,
+      roles: {
+        background: pair.background,
+        outline: pair.figure,
+      },
+    };
+  }
+
   function variantChipsMarkup(variant) {
     const chips = Array.isArray(variant?.ui?.chips) ? variant.ui.chips : [];
     if (!chips.length) {
@@ -1049,91 +1416,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return palette[0] || "#000000";
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  }
-
-  function buildReactiveDitherPalette() {
-    const engine = state.activeDitherEngine || "diffusion";
-    const bgHex = state.useActiveBg ? selectedActiveHex() : currentBackgroundHex();
-    const activeHex = selectedActiveHex();
-    const rolePair = deriveRolePair(bgHex, activeRoleStep());
-    const used = new Set([rolePair.background]);
-    const floor = hexLuma(rolePair.figure);
-    const reactiveHexes = [ensureDistinctHex(rolePair.figure, used, { floor: hexLuma(rolePair.background) })];
-    const sourceHexes = state.ditherPalette.map((source) => rgbToHex(source.r, source.g, source.b));
-
-    if (engine === "bayer") {
-      const orderedHexes = [
-        mixHex(rolePair.figure, activeHex, 0.18),
-        mixHex(rolePair.figure, activeHex, 0.42),
-        mixHex(activeHex, "#FFFFFF", 0.14),
-        mixHex(sourceHexes[0] || activeHex, "#FFFFFF", 0.08),
-      ];
-      orderedHexes.forEach((hex) => reactiveHexes.push(ensureDistinctHex(hex, used, { floor })));
-    } else if (engine === "cluster") {
-      const clusteredHexes = [
-        mixHex(rolePair.figure, sourceHexes[0] || activeHex, 0.24),
-        mixHex(rolePair.figure, sourceHexes[1] || activeHex, 0.46),
-        mixHex(sourceHexes[2] || activeHex, bgHex, 0.1),
-      ];
-      clusteredHexes.forEach((hex) => reactiveHexes.push(ensureDistinctHex(hex, used, { floor })));
-    } else if (engine === "scan") {
-      const scanHexes = [
-        mixHex(rolePair.figure, activeHex, 0.2),
-        mixHex(sourceHexes[0] || activeHex, rolePair.figure, 0.3),
-        mixHex(sourceHexes[1] || activeHex, "#FFFFFF", 0.1),
-        mixHex(sourceHexes[2] || activeHex, activeHex, 0.26),
-      ];
-      scanHexes.forEach((hex) => reactiveHexes.push(ensureDistinctHex(hex, used, { floor })));
-    } else {
-      for (let i = 0; i < sourceHexes.length; i += 1) {
-        const sourceHex = sourceHexes[i];
-        let nextHex = mixHex(sourceHex, bgHex, 0.18 + ((i % 3) * 0.06));
-        if (hexLuma(nextHex) <= floor) {
-          nextHex = mixHex(rolePair.figure, sourceHex, 0.35 + ((i % 2) * 0.08));
-        }
-        reactiveHexes.push(ensureDistinctHex(nextHex, used, { floor }));
-      }
-    }
-
-    return reactiveHexes.slice(0, 6).map((hex) => hexToRgb(hex));
-  }
-
-  function ditherStrengthForEngine(baseStrength) {
-    const base = Math.max(0, Math.min(1, Number(baseStrength) || 0));
-    if (state.activeDitherEngine === "bayer") return Math.min(1, (base * 1.16) + 0.04);
-    if (state.activeDitherEngine === "cluster") return Math.min(1, (base * 1.08) + 0.02);
-    if (state.activeDitherEngine === "scan") return Math.min(1, (base * 1.12) + 0.05);
-    return Math.max(0, base * 0.88);
-  }
-
-  function buildEngineOccupiedSet(imageData) {
-    const fallback = canvas.getOccupied();
-    if (!state.originalRoleMap || canvas.subdivision > 1) return fallback;
-    const selected = new Set();
-    for (let y = 0; y < imageData.height; y += 1) {
-      for (let x = 0; x < imageData.width; x += 1) {
-        const key = `${x},${y}`;
-        if (!fallback.has(key)) continue;
-        const role = state.originalRoleMap.get(key) || "body";
-        if (state.activeDitherEngine === "diffusion") {
-          if (role === "outline") continue;
-          selected.add(key);
-          continue;
-        }
-        if (state.activeDitherEngine === "cluster") {
-          if (role === "accent") continue;
-          selected.add(key);
-          continue;
-        }
-        if (state.activeDitherEngine === "scan") {
-          if (role === "accent") continue;
-          if (role === "body" || role === "outline" || role === "neutral") selected.add(key);
-          continue;
-        }
-        selected.add(key);
-      }
-    }
-    return selected.size ? selected : fallback;
   }
 
   function nearestPaletteHex(targetHex, palette = null) {
@@ -1200,16 +1482,31 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.galleryList.innerHTML = state.galleryItems.map((item) => {
       const bg = item.rolePair?.background || "";
       const fg = item.rolePair?.figure || "";
+      const mediaType = String(item.mediaType || "").toLowerCase() === "gif" ? "gif" : "png";
+      const mediaUrl = item.thumbUrl || item.mediaUrl || item.viewUrl || item.pngUrl || item.gifUrl || "";
+      const signature = String(item.signatureHandle || "").trim();
+      const signatureResolved = signature
+        || String(item.signature || item.twitterHandle || "").trim();
+      const palette = resolveGalleryPalette(item);
+      const palettePreview = palette.slice(0, 8);
       const colorPair = bg && fg && bg !== "—" && fg !== "—"
         ? `<span class="gallery-subline gallery-color-pair"><span class="gallery-color-dot" style="background:${escapeHtml(bg)}"></span><span class="gallery-color-dot" style="background:${escapeHtml(fg)}"></span> ${escapeHtml(bg)} → ${escapeHtml(fg)}</span>`
         : `<span class="gallery-subline">${escapeHtml(bg || "—")} → ${escapeHtml(fg || "—")}</span>`;
+      const signatureLine = signatureResolved
+        ? `<span class="gallery-subline gallery-signature">${escapeHtml(signatureResolved)}</span>`
+        : "";
+      const paletteLine = palettePreview.length
+        ? `<span class="gallery-palette-strip">${palettePreview.map((hex) => `<span class="gallery-palette-chip" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)}"></span>`).join("")}${palette.length > palettePreview.length ? `<span class="gallery-palette-count">+${palette.length - palettePreview.length}</span>` : ""}</span>`
+        : "";
       return `
-      <a class="gallery-card" href="${escapeHtml(item.viewUrl || item.pngUrl || "#")}" target="_blank" rel="noreferrer">
-        <img class="gallery-thumb" src="${escapeHtml(item.pngUrl || "")}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
+      <a class="gallery-card" href="${escapeHtml(item.viewUrl || mediaUrl || "#")}" target="_blank" rel="noreferrer">
+        <img class="gallery-thumb" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
         <span class="gallery-meta">
           <span class="gallery-title">${escapeHtml(item.label || `No-Studio #${item.tokenId || 0}`)}</span>
-          <span class="gallery-subline">#${Number(item.tokenId) || 0} \u00b7 ${(item.family || "studio").toUpperCase()}</span>
+          <span class="gallery-subline">#${Number(item.tokenId) || 0} \u00b7 ${(item.family || "studio").toUpperCase()} \u00b7 ${mediaType.toUpperCase()}</span>
           ${colorPair}
+          ${paletteLine}
+          ${signatureLine}
         </span>
       </a>
     `;
@@ -1240,145 +1537,124 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
   }
 
-  async function saveCurrentToGallery() {
+  function normalizeSignatureHandle(value) {
+    const cleaned = String(value || "")
+      .trim()
+      .replace(/^@+/, "")
+      .replace(/[^a-zA-Z0-9_]/g, "")
+      .slice(0, 15);
+    return cleaned ? `@${cleaned}` : "";
+  }
+
+  async function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Failed to read blob"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function buildNoiseGifDataUrlForGallery() {
+    const grain = canvas.getDisplayGrain();
+    if (!grain.enabled || !(grain.amount > 0)) {
+      throw new Error("Enable grain first to save GIF to No-Gallery");
+    }
+    if (state.noiseGifAvailable) {
+      try {
+        const imageData = canvas.exportImageData();
+        const rgba24B64 = encodeRgba24B64(imageData.data);
+        const occupiedPixels = Array.from(state.originalOccupied || canvas.getOccupied());
+        const payload = await renderNoStudioNoiseGif({
+          tokenId: state.selected.id,
+          rgba24B64,
+          occupiedPixels,
+          grain,
+        });
+        const response = await fetch(payload.output.gifUrl, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`GIF fetch failed (${response.status})`);
+        }
+        const blob = await response.blob();
+        return await blobToDataUrl(blob);
+      } catch (error) {
+        if (!/local No-Studio server/i.test(String(error.message || ""))) {
+          throw error;
+        }
+      }
+    }
+    const browserGif = await exportNoiseGifInBrowser();
+    return await blobToDataUrl(browserGif.blob);
+  }
+
+  async function saveCurrentToGallery({ mediaKind = "png" } = {}) {
     if (!state.selected || state.gallerySaving) return;
     if (!state.noGalleryAvailable) {
       setTopbarStatus("No-Gallery is local-server only");
       return;
     }
+    if (mediaKind !== "png" && mediaKind !== "gif") {
+      setTopbarStatus("Unsupported gallery media type");
+      return;
+    }
+
+    const signatureHandle = normalizeSignatureHandle(els.gallerySignature?.value || state.gallerySignature || "");
+    state.gallerySignature = signatureHandle;
+    if (els.gallerySignature) {
+      els.gallerySignature.value = signatureHandle;
+    }
+
     state.gallerySaving = true;
+    state.gallerySavingKind = mediaKind;
     updateExportButtons();
-    const originalLabel = els.saveGallery ? els.saveGallery.textContent : "";
-    if (els.saveGallery) {
-      els.saveGallery.disabled = true;
-      els.saveGallery.textContent = "Saving...";
+    const saveButton = mediaKind === "gif" ? els.saveGalleryGif : els.saveGalleryPng;
+    const originalLabel = saveButton ? saveButton.textContent : "";
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = mediaKind === "gif" ? "Saving GIF..." : "Saving PNG...";
     }
     try {
-      const pngDataUrl = canvas.exportPng1024().toDataURL("image/png");
+      let mediaDataUrl = "";
+      if (mediaKind === "gif") {
+        mediaDataUrl = await buildNoiseGifDataUrlForGallery();
+      } else {
+        mediaDataUrl = canvas.exportPng1024().toDataURL("image/png");
+      }
       const payload = await saveNoStudioGallery({
         tokenId: state.selected.id,
         family: state.activePresetTab === "warhol" ? "pop" : state.activePresetTab,
-        label: els.topbarStatus.textContent || `No-Studio #${state.selected.id}`,
+        label: normalizeGalleryLabel(els.topbarStatus.textContent, state.selected.id),
+        mediaType: mediaKind,
+        mediaDataUrl,
+        pngDataUrl: mediaKind === "png" ? mediaDataUrl : undefined,
+        gifDataUrl: mediaKind === "gif" ? mediaDataUrl : undefined,
+        signatureHandle,
+        signature: signatureHandle,
+        twitterHandle: signatureHandle,
+        palette: normalizeHexPalette(canvas.getCurrentPalette()),
+        paletteHexes: normalizeHexPalette(canvas.getCurrentPalette()),
         rolePair: {
           background: state.noMinimalPreviewPair?.background || currentBackgroundHex(),
           figure: state.noMinimalPreviewPair?.figure || "—",
           mode: state.noMinimalDeltaMode,
         },
-        pngDataUrl,
       });
       if (payload?.item) {
         state.galleryItems = [payload.item, ...state.galleryItems.filter((entry) => entry.id !== payload.item.id)].slice(0, 12);
       }
       state.galleryMessage = "";
       renderGallery();
-      setTopbarStatus("Saved to No-Gallery");
+      setTopbarStatus(`Saved ${mediaKind.toUpperCase()} to No-Gallery`);
     } catch (error) {
       setTopbarStatus(error.message || "Save to No-Gallery failed");
     } finally {
       state.gallerySaving = false;
-      if (els.saveGallery) {
-        els.saveGallery.textContent = originalLabel || "Save To No-Gallery";
+      state.gallerySavingKind = null;
+      if (saveButton) {
+        saveButton.textContent = originalLabel || (mediaKind === "gif" ? "Save GIF To No-Gallery" : "Save PNG To No-Gallery");
       }
       updateExportButtons();
     }
-  }
-
-  function applyStudioCut(modeId) {
-    if (!state.selected || !state.originalRoleMap) return;
-    const current = canvas.exportImageData();
-    const next = new Uint8ClampedArray(current.data);
-    const occupied = state.originalOccupied || canvas.getOccupied();
-    const roleMap = state.originalRoleMap;
-    const bgHex = state.useActiveBg ? selectedActiveHex() : currentBackgroundHex();
-    const rolePair = deriveRolePair(bgHex, activeRoleStep());
-    const palette = canvas.getCurrentPalette().filter((hex) => hex !== rolePair.background && hex !== rolePair.figure)
-      .sort((a, b) => hexLuma(a) - hexLuma(b));
-    const brightHex = palette[palette.length - 1] || mixHex(rolePair.figure, "#FFFFFF", 0.42);
-    const midHex = palette[Math.floor(palette.length / 2)] || mixHex(rolePair.figure, brightHex, 0.34);
-    const plateBaseHex = mixHex(rolePair.figure, midHex, 0.28);
-    const plateShiftHex = mixHex(midHex, brightHex, 0.24);
-    const hotPlateHex = mixHex(brightHex, "#FFFFFF", 0.14);
-    const fieldLowHex = mixHex(rolePair.background, rolePair.figure, 0.34);
-    const fieldMidHex = mixHex(rolePair.background, rolePair.figure, 0.52);
-    const innerFieldHex = mixHex(rolePair.figure, brightHex, 0.12);
-
-    const cutLabels = {
-      "plate-shift": "Plate Shift",
-      "relief-field": "Relief Field",
-    };
-    const cutLabel = cutLabels[modeId] || modeId;
-
-    for (let y = 0; y < current.height; y += 1) {
-      for (let x = 0; x < current.width; x += 1) {
-        const i = (y * current.width + x) * 4;
-        const key = `${x},${y}`;
-        let targetHex = rolePair.background;
-        if (!occupied.has(key)) {
-          if (modeId === "relief-field") {
-            const wave = (x * 3) + (y * 5) + state.toneStep;
-            const band = ((Math.floor(wave / 4) % 3) + 3) % 3;
-            targetHex = band === 0 ? rolePair.background : (band === 1 ? fieldLowHex : fieldMidHex);
-          }
-        } else {
-          const role = roleMap.get(key) || "body";
-          if (role === "outline") {
-            targetHex = rolePair.figure;
-          } else if (modeId === "plate-shift") {
-            const stripe = ((x + (y * 2) + state.toneStep) % 4 + 4) % 4;
-            if (role === "accent") {
-              targetHex = stripe >= 2 ? hotPlateHex : brightHex;
-            } else if (role === "neutral") {
-              targetHex = stripe % 2 === 0 ? plateShiftHex : midHex;
-            } else {
-              targetHex = stripe <= 1 ? plateBaseHex : plateShiftHex;
-            }
-          } else if (modeId === "relief-field") {
-            targetHex = role === "accent" ? brightHex : (role === "neutral" ? innerFieldHex : fieldMidHex);
-          } else {
-            targetHex = role === "accent" ? brightHex : plateBaseHex;
-          }
-        }
-        const rgb = hexToRgb(targetHex);
-        next[i] = rgb.r;
-        next[i + 1] = rgb.g;
-        next[i + 2] = rgb.b;
-        next[i + 3] = 255;
-      }
-    }
-
-    const roleStep = activeRoleStep();
-    const roleTag = roleStep === 4 && ["mono", "noir", "pastel"].includes(activeCreativeFamily()) ? "Δ4 role lock" : `Δ${state.toneStep}`;
-    state.lastReductionMode = modeId;
-    canvas.applyImageData(new ImageData(next, current.width, current.height));
-    setTopbarStatus(`${cutLabel} · ${roleTag} · ${state.essentialTones} tones`);
-    pulseStudio(modeId === "relief-field" ? "surprise" : "variant");
-  }
-
-  function applySerialSheet() {
-    if (!state.selected) return;
-    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const family = activeCreativeFamily();
-    const previousSubdiv = canvas.subdivision;
-    setSubdivisionValue(2);
-    const serialVariants = Array.from({ length: 4 }, () => createUniqueVariant(family, classified));
-    canvas.applyGridMapping((col, row, blockIdx) => {
-      const preset = serialVariants[blockIdx] || serialVariants[(row * 2) + col] || serialVariants[0];
-      const result = collapsePresetResult(
-        classified,
-        applyPreset(preset, classified, {
-          toneStep: state.toneStep,
-          roleStep: activeRoleStep(),
-          backgroundHex: state.useActiveBg && family === "warhol" ? selectedActiveHex() : null,
-        }),
-        family === "warhol" ? Math.max(4, state.essentialTones) : Math.max(4, state.essentialTones),
-      );
-      return result;
-    });
-    state.variantByFamily[family] = serialVariants[0];
-    renderVariantPanel();
-    const familyLabel = family === "warhol" ? "Pop Sheet" : "Serial Sheet";
-    setTopbarStatus(`${familyLabel} · 2x2 serial print · ${family === "warhol" ? Math.max(4, state.essentialTones) : Math.max(4, state.essentialTones)} tones${previousSubdiv !== 2 ? " · grid locked to 2x2" : ""}`);
-    pulseStudio("surprise");
   }
 
   function getPopSheetSpec(layoutId) {
@@ -1397,19 +1673,17 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const source = state.originalImageData;
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
     const panelCount = cols * rows;
-    const toneTarget = Math.max(4, state.essentialTones);
 
-    const panelResults = Array.from({ length: panelCount }, () => {
+    const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => {
       const preset = createUniqueVariant("warhol", classified);
-      const result = collapsePresetResult(
-        classified,
-        applyPreset(preset, classified, {
-          toneStep: state.toneStep,
-          roleStep: state.toneStep,
-          backgroundHex: null,
-        }),
-        toneTarget,
-      );
+      const backgroundHex = state.useActiveBg ? selectedActiveHex() : null;
+      const result = buildFamilyResult(classified, "warhol", {
+        preset,
+        backgroundHex,
+        traitPhase: state.traitRecastNonce,
+        panelIndex,
+        panelCount,
+      });
       return {
         preset,
         mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
@@ -1446,6 +1720,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
     state.variantByFamily.warhol = panelResults[0]?.preset || null;
     state.noFieldLastFamily = "warhol";
+    state.isSheetMode = true;
     state.lastReductionMode = "pop-sheet";
     canvas.setSheetTiles(tiles, cols, rows);
     renderVariantPanel();
@@ -1453,118 +1728,274 @@ export function mountNoStudioTool(root, shellApi = {}) {
     pulseStudio("surprise");
   }
 
-  function noFieldToneTarget() {
-    const intensity = Math.max(0, Math.min(100, Number(state.noFieldIntensity) || 0)) / 100;
-    return clampEssentialTones(Math.round(lerp(7, 3, intensity)));
+  function clampUnit(value) {
+    return Math.max(0, Math.min(1, Number(value) || 0));
   }
 
-  function chooseNoFieldFamily() {
-    if (state.noFieldCore === "mono" || state.noFieldCore === "noir" || state.noFieldCore === "warhol" || state.noFieldCore === "acid" || state.noFieldCore === "pastel") {
-      return state.noFieldCore;
+  function quantizeUnit(value, levels) {
+    const maxLevel = Math.max(1, Math.round(levels) - 1);
+    return Math.round(clampUnit(value) * maxLevel) / maxLevel;
+  }
+
+  function familyToneTarget(family) {
+    const toneCount = Math.max(2, Math.min(8, Math.round(Number(state.globalModifiers.toneCount) || 5)));
+    if (family === "warhol") return Math.max(4, toneCount);
+    if (family === "acid") return Math.max(5, toneCount);
+    if (family === "pastel") return Math.max(4, toneCount);
+    return toneCount;
+  }
+
+  function createFamilyHueBank(family, bgHue, fm, panelIndex, panelCount, driftNorm) {
+    if (family === "mono") {
+      const drift = Number(fm.hueDrift) || 0;
+      const spread = Math.max(4, drift * 0.9);
+      return [bgHue, bgHue + spread, bgHue - spread];
     }
-    const intensity = Math.max(0, Math.min(100, Number(state.noFieldIntensity) || 0)) / 100;
-    const field = Math.max(0, Math.min(100, Number(state.noFieldField) || 0)) / 100;
-    if (state.noFieldSerial) return "warhol";
-    if (field >= 0.72) return pickOne(["noir", "acid", "warhol"]) || "noir";
-    if (intensity >= 0.72) return pickOne(["noir", "acid", "pastel"]) || "noir";
-    if (intensity <= 0.28 && field <= 0.42) return pickOne(["warhol", "pastel"]) || "warhol";
-    return pickOne(["noir", "mono", "warhol", "acid", "pastel"]) || "noir";
+    if (family === "noir") {
+      return [bgHue, bgHue + 10, bgHue - 10];
+    }
+    if (family === "warhol") {
+      const divergence = clampUnit((Number(fm.panelDivergence) || 0) / 100);
+      const panelShift = panelCount > 1
+        ? (((panelIndex / Math.max(1, panelCount - 1)) - 0.5) * 140 * divergence)
+        : 0;
+      return [
+        bgHue + 96 + panelShift,
+        bgHue + 186 + panelShift,
+        bgHue + 268 + panelShift,
+        bgHue + 318 + panelShift,
+      ];
+    }
+    if (family === "acid") {
+      const clash = Number(fm.clashAngle) || 132;
+      return [
+        bgHue + clash,
+        bgHue - clash,
+        bgHue + 180,
+      ];
+    }
+    return [
+      bgHue + (22 + (driftNorm * 10)),
+      bgHue - (18 + (driftNorm * 8)),
+      bgHue + 52,
+    ];
   }
 
-  function buildNoFieldSingle(classified, family, backgroundHex, toneTarget) {
-    const preset = createUniqueVariant(family, classified);
-    state.variantByFamily[family] = preset;
-    const base = applyPreset(preset, classified, {
-      toneStep: state.toneStep,
-      roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
+  function applyStyledFamilyMapping(
+    result,
+    classified,
+    family,
+    { preset = null, traitPhase = 0, panelIndex = 0, panelCount = 1 } = {},
+  ) {
+    const mapping = { ...(result?.mapping || {}) };
+    const roles = result?.roles || {};
+    const entries = (classified || []).filter((entry) => entry.role !== "background" && entry.role !== "outline");
+    if (!entries.length) {
+      return { mapping, roles };
+    }
+
+    const sortedEntries = entries.slice().sort((a, b) => hexLuma(a.hex) - hexLuma(b.hex));
+    const used = new Set([String(roles.background || "").toUpperCase(), String(roles.outline || "").toUpperCase()]);
+    const forbidden = new Set((classified || []).map((entry) => String(entry?.hex || "").toUpperCase()));
+    forbidden.add(BRAND_ROLE_BG);
+    forbidden.add(BRAND_ROLE_FG);
+    const floor = hexLuma(roles.outline || BRAND_ROLE_FG) + 2;
+    const gm = state.globalModifiers;
+    const fm = state.familyModifiers[family] || {};
+    const profile = getFamilyProfile(family);
+    const contrastNorm = clampUnit(gm.contrast / 100);
+    const traitNorm = clampUnit(gm.traitFocus / 100);
+    const driftNorm = clampUnit(gm.paletteDrift / 100);
+    const total = Math.max(1, sortedEntries.length - 1);
+
+    const bgRgb = hexToRgb(roles.background || "#000000");
+    const bgHsl = rgbToHsl(bgRgb.r, bgRgb.g, bgRgb.b);
+    const hueBank = createFamilyHueBank(family, bgHsl.h, fm, panelIndex, panelCount, driftNorm)
+      .map((value) => ((value % 360) + 360) % 360);
+    const targetTones = familyToneTarget(family);
+    const toneLevels = Math.max(profile.quantMin, Math.min(profile.quantMax, targetTones));
+    const midpoint = (profile.light[0] + profile.light[1]) / 2;
+    const presetPhase = Number(preset?.variantPhase ?? preset?.phase ?? preset?.huePhase ?? preset?.driftPhase ?? 0);
+    const presetContrast = clampUnit(Number(preset?.contrast ?? 1) / 2.2);
+
+    for (let idx = 0; idx < sortedEntries.length; idx += 1) {
+      const entry = sortedEntries[idx];
+      const rank = idx / total;
+      const role = entry.role || "body";
+      const pulse = Math.sin(((idx + 1) * 1.17) + (traitPhase * 0.37) + (presetPhase * 0.6));
+      const baseHue = hueBank[(idx + (role === "accent" ? 1 : 0)) % hueBank.length];
+      let hue = (baseHue + (pulse * (6 + (driftNorm * 12))) + (panelIndex * 1.6) + 720) % 360;
+      let sat = lerp(profile.sat[0], profile.sat[1], rank);
+      let light = lerp(profile.light[0], profile.light[1], rank);
+      let levels = toneLevels;
+
+      if (family === "mono") {
+        const hueDrift = (Number(fm.hueDrift) || 0) * (0.2 + (driftNorm * 0.7));
+        const stepCompression = clampUnit((Number(fm.stepCompression) || 0) / 100);
+        hue = (bgHsl.h + (pulse * hueDrift) + (driftNorm * 5) + 360) % 360;
+        sat = clampUnit(lerp(0.02, 0.18, rank) + (role === "accent" ? (traitNorm * 0.06) : 0));
+        levels = Math.max(2, Math.round(lerp(levels, 2, stepCompression)));
+      } else if (family === "noir") {
+        const shadowDepth = clampUnit((Number(fm.shadowDepth) || 0) / 100);
+        const accentGate = clampUnit((Number(fm.accentGate) || 0) / 100);
+        const depthLayers = Math.max(3, Math.min(8, Math.round(Number(preset?.depthLayers) || 4)));
+        const layerIndex = idx % depthLayers;
+        const layerT = layerIndex / Math.max(1, depthLayers - 1);
+        const layerPulse = Math.sin((layerT * Math.PI * 2) + (presetPhase * 0.7) + (traitPhase * 0.23));
+        const chiaroscuro = clampUnit(Number(preset?.chiaroscuro) || 0.5);
+        const voidBias = clampUnit(Number(preset?.voidBias) || 0.42);
+        const spectralTilt = Number(preset?.spectralTilt) || 0;
+        const darkLift = Math.max(0.16, 0.34 - (shadowDepth * 0.14));
+        hue = (bgHsl.h + (spectralTilt * (layerT - 0.5)) + (pulse * (2.2 + (driftNorm * 2.2))) + 360) % 360;
+        sat = clampUnit(
+          0.01
+          + (layerT * 0.08)
+          + (Math.abs(layerPulse) * 0.02)
+          + (role === "accent" ? ((1 - accentGate) * 0.08) : 0),
+        );
+        light = clampUnit(
+          (0.05 + (voidBias * 0.03))
+          + ((rank * darkLift) * (0.68 + (chiaroscuro * 0.22)))
+          + (layerPulse * (0.02 + (chiaroscuro * 0.035)))
+          + (role === "accent" ? ((1 - accentGate) * 0.095) : 0),
+        );
+        levels = Math.max(3, Math.min(5, levels));
+      } else if (family === "warhol") {
+        const flatness = clampUnit((Number(fm.flatness) || 0) / 100);
+        sat = clampUnit(0.72 + ((1 - flatness) * 0.24) + (role === "accent" ? 0.06 : 0));
+        levels = Math.max(3, Math.round(lerp(6, 3, flatness)));
+      } else if (family === "acid") {
+        const corrosion = clampUnit((Number(fm.corrosion) || 0) / 100);
+        sat = clampUnit(0.82 + (corrosion * 0.16));
+        light = clampUnit(0.14 + (rank * 0.58) + (pulse * 0.08 * corrosion) + (role === "accent" ? 0.06 : 0));
+      } else if (family === "pastel") {
+        const softness = clampUnit((Number(fm.powderSoftness) || 0) / 100);
+        const airLift = clampUnit((Number(fm.airLift) || 0) / 100);
+        sat = clampUnit(0.08 + ((1 - softness) * 0.22) + (role === "accent" ? 0.03 : 0));
+        light = clampUnit(0.64 + (airLift * 0.24) + (rank * 0.18) - (softness * 0.06));
+        levels = Math.max(3, Math.round(lerp(7, 4, softness)));
+      }
+
+      const contrastScale = lerp(0.72, 1.38, (contrastNorm * 0.7) + (presetContrast * 0.3));
+      light = clampUnit(midpoint + ((light - midpoint) * contrastScale));
+      if (role === "accent") {
+        sat = clampUnit(sat + (traitNorm * 0.09));
+        light = clampUnit(light + (traitNorm * profile.accentLift));
+      } else if (role === "neutral") {
+        sat = clampUnit(sat + (traitNorm * 0.03));
+      }
+      hue = (hue + (pulse * 14 * driftNorm) + 720) % 360;
+      light = quantizeUnit(light, levels);
+
+      const rgb = hslToRgb(hue, sat, light);
+      let mappedHex = rgbToHex(rgb.r, rgb.g, rgb.b);
+      if (hexLuma(mappedHex) <= floor) {
+        mappedHex = mixHex(mappedHex, "#FFFFFF", 0.2 + (traitNorm * 0.1));
+      }
+      mapping[entry.hex] = ensureDistinctHex(mappedHex, used, { floor, forbidden });
+    }
+
+    return { mapping, roles };
+  }
+
+  function buildFamilyResult(classified, family, {
+    preset,
+    backgroundHex = null,
+    traitPhase = 0,
+    panelIndex = 0,
+    panelCount = 1,
+  } = {}) {
+    const toneTarget = familyToneTarget(family);
+    const effectivePreset = preset || createUniqueVariant(family, classified);
+    const base = applyPreset(effectivePreset, classified, {
+      toneStep: DEFAULT_TONE_STEP,
+      roleStep: activeRoleStep(),
       backgroundHex,
     });
-    const result = collapsePresetResult(classified, base, toneTarget);
-    syncHeroPairFromRoles(result.roles, family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep);
-    canvas.applyColorMapping(result.mapping, result.roles);
-    return preset;
-  }
-
-  function buildNoFieldSerial(classified, family, backgroundHex, toneTarget) {
-    const previousSubdiv = canvas.subdivision;
-    setSubdivisionValue(2);
-    const variants = Array.from({ length: 4 }, () => createUniqueVariant(family, classified));
-    const previewResult = collapsePresetResult(
-      classified,
-      applyPreset(variants[0], classified, {
-        toneStep: state.toneStep,
-        roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
-        backgroundHex,
-      }),
-      toneTarget,
-    );
-    syncHeroPairFromRoles(previewResult.roles, family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep);
-    canvas.applyGridMapping((col, row, blockIdx) => {
-      const preset = variants[blockIdx] || variants[(row * 2) + col] || variants[0];
-      return collapsePresetResult(
-        classified,
-        applyPreset(preset, classified, {
-          toneStep: state.toneStep,
-          roleStep: family === "mono" || family === "noir" || family === "pastel" ? 4 : state.toneStep,
-          backgroundHex,
-        }),
-        toneTarget,
-      );
+    const strictRoles = enforceRolePairRules(base, classified, backgroundHex, family);
+    const collapsed = collapsePresetResult(classified, strictRoles, toneTarget);
+    const styled = applyStyledFamilyMapping(collapsed, classified, family, {
+      preset: effectivePreset,
+      traitPhase,
+      panelIndex,
+      panelCount,
     });
-    state.variantByFamily[family] = variants[0];
-    return previousSubdiv;
+    return {
+      preset: effectivePreset,
+      mapping: styled.mapping,
+      roles: styled.roles,
+      toneTarget,
+    };
   }
 
-  function runNoFieldPass({ family, holdWorld = false, serial = state.noFieldSerial, statusPrefix = "Studio" } = {}) {
+  function resolveBackgroundForReroll(rerollMode, family) {
+    if (state.useActiveBg) {
+      return deriveNoMinimalismPair(selectedActiveHex(), state.noMinimalDeltaMode).background;
+    }
+    if (rerollMode === "palette" || rerollMode === "traits") {
+      return ensureNoMinimalPreviewPair().background;
+    }
+    if (rerollMode === "world") {
+      const worldBg = familyWorldBackgroundHex(family);
+      state.noMinimalPreviewPair = deriveNoMinimalismPair(worldBg, state.noMinimalDeltaMode);
+      return state.noMinimalPreviewPair.background;
+    }
+    return ensureNoMinimalPreviewPair().background;
+  }
+
+  function runNoFieldPass({ family = activeCreativeFamily(), rerollMode = "world", statusPrefix = "Cast" } = {}) {
     if (!state.selected) {
       setServerStatus("Select a NoPunk first.");
       return null;
     }
 
-    if (!serial && canvas.subdivision !== state.userSubdivision) {
-      setSubdivisionValue(state.userSubdivision);
-    }
-
+    state.isSheetMode = false;
+    canvas.setSubdivision(1);
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const pair = holdWorld ? ensureNoMinimalPreviewPair() : null;
-    const backgroundHex = holdWorld ? pair.background : (state.useActiveBg && family === "warhol" ? selectedActiveHex() : null);
-    const toneTarget = family === "warhol"
-      ? Math.max(4, noFieldToneTarget())
-      : family === "acid"
-        ? Math.max(5, noFieldToneTarget())
-        : noFieldToneTarget();
-    const fieldLevel = Math.max(0, Math.min(100, Number(state.noFieldField) || 0));
-    const finishLevel = Math.max(0, Math.min(100, Number(state.noFieldFinish) || 0));
-
-    let previousSubdiv = null;
-    if (serial) {
-      previousSubdiv = buildNoFieldSerial(classified, family, backgroundHex, toneTarget);
-    } else {
-      buildNoFieldSingle(classified, family, backgroundHex, toneTarget);
+    const currentVariant = state.variantByFamily[family];
+    const shouldReusePreset = rerollMode === "traits" && currentVariant;
+    const preset = shouldReusePreset ? currentVariant : createUniqueVariant(family, classified);
+    const backgroundHex = resolveBackgroundForReroll(rerollMode, family);
+    if (rerollMode === "traits") {
+      state.traitRecastNonce += 1;
     }
 
-    if (fieldLevel >= 58) {
-      applyStudioCut(fieldLevel >= 76 ? "relief-field" : "plate-shift");
-    }
+    const result = buildFamilyResult(classified, family, {
+      preset,
+      backgroundHex,
+      traitPhase: state.traitRecastNonce,
+      panelIndex: 0,
+      panelCount: 1,
+    });
 
+    state.variantByFamily[family] = result.preset;
+    syncHeroPairFromRoles(result.roles, activeRoleStep());
+    canvas.applyColorMapping(result.mapping, result.roles);
     state.noFieldLastFamily = family;
+    state.lastReductionMode = "none";
     renderHeroRolePair();
     renderVariantPanel();
-    const familyLabel = family === "warhol" ? "Pop" : family.charAt(0).toUpperCase() + family.slice(1);
-    const serialNote = serial ? ` · serial 2x2${previousSubdiv !== 2 ? " locked" : ""}` : "";
-    setTopbarStatus(`${statusPrefix} · ${familyLabel} · intensity ${state.noFieldIntensity}% · field ${state.noFieldField}% · finish ${state.noFieldFinish}%${serialNote}`);
-    pulseStudio(holdWorld ? "variant" : "surprise");
-    return { family, pair: state.noMinimalPreviewPair, toneTarget, serial, previousSubdiv };
+
+    const familyLabel = FAMILY_LABELS[family] || "Studio";
+    const rerollLabel = rerollMode === "palette"
+      ? "palette reroll"
+      : rerollMode === "traits"
+        ? "trait reroll"
+        : "world reroll";
+    setTopbarStatus(`${statusPrefix} · ${familyLabel} · ${result.toneTarget} tones · ${rerollLabel}`);
+    pulseStudio(rerollMode === "traits" ? "trait" : "variant");
+    return result;
   }
 
-  function applyNoField({ holdWorld = false } = {}) {
-    const family = chooseNoFieldFamily();
-    runNoFieldPass({ family, holdWorld, serial: state.noFieldSerial, statusPrefix: "Cast" });
+  function applyNoField({ rerollMode = "world" } = {}) {
+    runNoFieldPass({ family: activeCreativeFamily(), rerollMode, statusPrefix: "Cast" });
   }
 
   function applyNoMinimalism() {
     if (!state.selected || !state.originalRoleMap) return;
 
+    state.isSheetMode = false;
+    canvas.setSubdivision(1);
     const current = canvas.exportImageData();
     const next = new Uint8ClampedArray(current.data);
     const occupied = state.originalOccupied || canvas.getOccupied();
@@ -1593,77 +2024,43 @@ export function mountNoStudioTool(root, shellApi = {}) {
   }
 
   function renderVariantPanel() {
-    const current = state.variantByFamily[state.noFieldLastFamily] || null;
-    const familyLabel = state.noFieldLastFamily === "warhol"
-      ? "Pop"
-      : state.noFieldLastFamily.charAt(0).toUpperCase() + state.noFieldLastFamily.slice(1);
     const activeTab = state.activePresetTab;
-    const toneTarget = activeTab === "warhol"
-      ? Math.max(4, noFieldToneTarget())
-      : activeTab === "acid"
-        ? Math.max(5, noFieldToneTarget())
-        : noFieldToneTarget();
+    const current = state.variantByFamily[activeTab] || null;
+    const familyLabel = FAMILY_LABELS[activeTab] || "Studio";
+    const toneTarget = familyToneTarget(activeTab);
     const world = ensureNoMinimalPreviewPair();
-    const selectedTool = activeTab === "warhol"
-      ? "Pop"
-      : activeTab.charAt(0).toUpperCase() + activeTab.slice(1);
-    const toolNote = {
-      mono: "Machine-picked monotone fields. Poster compression without losing the twin-lift.",
-      noir: "Dark relief-first casting. Twin-lift stays strict while the mass compresses.",
-      warhol: "Graphic serial color lanes. Build single-frame pop or multi-panel sheets with a unique palette in each cell.",
-      acid: "Synthetic, unstable, corrosive colour tension. High-contrast shifts and sharper, less comfortable harmony.",
-      pastel: "Soft, airy, powder-like colour. Light worlds, gentle separation and restrained contrast.",
-    }[activeTab] || "Original-source recast. Every pass starts from the loaded punk.";
-    const toolActions = activeTab === "warhol"
-      ? `
-        <div class="variant-action-grid">
-          <button class="preset-btn" type="button" data-action="render-core" data-family="warhol" title="Generate a new Pop render with a fresh random palette">Cast Pop</button>
-          <button class="preset-btn" type="button" data-action="build-pop-sheet" title="Create a multi-panel grid, each cell gets its own pop palette">Build Pop Sheet</button>
-        </div>
-      `
-      : `
-        <div class="variant-action-grid" style="grid-template-columns:1fr 1fr 1fr">
-          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab}" title="Generate a new ${escapeHtml(selectedTool)} render with a fresh random palette">Cast</button>
-          <button class="preset-btn" type="button" data-action="hold" title="Re-render using the same background/outline pair but a new palette variant">Hold World</button>
-          <button class="preset-btn" type="button" data-action="refresh-pair" title="New random background + outline pair">Recast</button>
-        </div>
-      `;
+    const familyHint = {
+      mono: "Tonal reduction and hue unity. Keep form while compressing colour variance.",
+      noir: "Dark-floor casting with controlled accent reveals. Concealment first.",
+      warhol: "Flat-impact serial colour logic built for single casts and panel sheets.",
+      acid: "Synthetic clash space with unstable complements and sharper tensions.",
+      pastel: "Airy high-light render with powder softness and quiet separations.",
+    }[activeTab] || "Every cast starts from the original source punk.";
+
     const popSheetControls = activeTab === "warhol"
       ? `
-        <div class="variant-title">Sheet Layout</div>
+        <div class="variant-title">Pop Sheet</div>
         <div class="theory-rail pop-sheet-rail">
           <button class="theory-btn${state.popSheetLayout === "2x2" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="2x2">2x2</button>
           <button class="theory-btn${state.popSheetLayout === "3x3" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="3x3">3x3</button>
           <button class="theory-btn${state.popSheetLayout === "4x4" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="4x4">4x4</button>
         </div>
-        <div class="mini-note no-field-guidance">Each panel uses the original 24×24 punk as a full tile with its own pop palette. The sheet does not resize the punk down inside the tile.</div>
+        <div class="variant-action-grid">
+          <button class="preset-btn" type="button" data-action="build-pop-sheet">Build Pop Sheet</button>
+        </div>
       `
       : "";
+
     els.presetList.innerHTML = `
       <div class="variant-panel no-field-panel">
-        <div class="mini-note no-field-guidance">${escapeHtml(toolNote)}</div>
-        <div class="role-pair-readout">Role pair \u00b7 ${escapeHtml(world.background)} \u2192 ${escapeHtml(world.figure)} \u00b7 ${world.roleStep} lift</div>
-        <div class="no-field-meters">
-          <label class="no-field-meter">
-            <span class="no-field-meter-label">Intensity</span>
-            <input type="range" class="color-slider" data-action="set-intensity" min="0" max="100" value="${state.noFieldIntensity}" />
-            <span class="color-slider-value">${state.noFieldIntensity}%</span>
-            <span class="no-field-meter-hint">Reduction strength. High = fewer tones, more abstract. Low = more colours survive.</span>
-          </label>
-          <label class="no-field-meter">
-            <span class="no-field-meter-label">Field</span>
-            <input type="range" class="color-slider" data-action="set-field" min="0" max="100" value="${state.noFieldField}" />
-            <span class="color-slider-value">${state.noFieldField}%</span>
-            <span class="no-field-meter-hint">Surface texture. Above ~60% adds plate-shift or relief-field cuts to the render.</span>
-          </label>
-          <label class="no-field-meter">
-            <span class="no-field-meter-label">Finish</span>
-            <input type="range" class="color-slider" data-action="set-finish" min="0" max="100" value="${state.noFieldFinish}" />
-            <span class="color-slider-value">${state.noFieldFinish}%</span>
-            <span class="no-field-meter-hint">Post-process polish. Controls dither and final texture density on the output.</span>
-          </label>
+        <div class="mini-note no-field-guidance">${escapeHtml(familyHint)}</div>
+        <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift · ${toneTarget} tones</div>
+        <div class="variant-action-grid">
+          <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab}">Cast ${escapeHtml(familyLabel)}</button>
+          <button class="preset-btn" type="button" data-action="reroll-palette">Re-roll Palette</button>
+          <button class="preset-btn" type="button" data-action="reroll-world">Re-roll World</button>
+          <button class="preset-btn" type="button" data-action="reroll-traits">Re-roll Traits</button>
         </div>
-        ${toolActions}
         ${popSheetControls}
         <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
         <div class="variant-chips">
@@ -1671,66 +2068,31 @@ export function mountNoStudioTool(root, shellApi = {}) {
         </div>
       </div>
     `;
-  }
-
-  function applyCreativeVariant({ maximal = false } = {}) {
-    if (!state.selected) return;
-    const family = activeCreativeFamily();
-    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const preset = createUniqueVariant(family, classified);
-    state.variantByFamily[family] = preset;
-    const presetOptions = {
-      toneStep: state.toneStep,
-      roleStep: activeRoleStep(),
-      backgroundHex: state.useActiveBg && family === "warhol" ? selectedActiveHex() : null,
-    };
-    let toneTarget = maximal ? 3 : state.essentialTones;
-    if (family === "warhol") {
-      toneTarget = Math.max(toneTarget, 4);
-    } else if (family === "acid") {
-      toneTarget = Math.max(toneTarget, 5);
-    }
-
-    if (canvas.subdivision <= 1) {
-      const base = applyPreset(preset, classified, presetOptions);
-      const result = collapsePresetResult(classified, base, toneTarget);
-      canvas.applyColorMapping(result.mapping, result.roles);
-    } else {
-      const baseGridFn = createGridPresetFn(preset, classified, presetOptions);
-      canvas.applyGridMapping((...args) => {
-        const result = baseGridFn(...args);
-        return collapsePresetResult(classified, result, toneTarget);
-      });
-    }
-
-    const roleTag = presetOptions.roleStep === 4 && ["mono", "noir", "pastel"].includes(family) ? "Δ4 role lock" : `Δ${state.toneStep}`;
-    state.lastReductionMode = "none";
-    renderVariantPanel();
-    setTopbarStatus(`${preset.name} · ${roleTag} · ${toneTarget} tones · ${canvas.subdivision}x${canvas.subdivision}`);
-    pulseStudio("variant");
-  }
-
-  function syncStudioDeckVisibility() {
-    if (els.activeBgToggle) {
-      els.activeBgToggle.style.display = state.activePresetTab === "warhol" ? "block" : "none";
-    }
+    renderFamilyModifierPanel();
   }
 
   function renderPresetList() {
-    syncStudioDeckVisibility();
     renderVariantPanel();
   }
 
   els.presetList.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
-    if (btn.dataset.action === "hold") {
-      applyNoField({ holdWorld: true });
-      return;
-    }
     if (btn.dataset.action === "render-core") {
       const family = btn.dataset.family || activeCreativeFamily();
-      runNoFieldPass({ family, holdWorld: false, serial: false, statusPrefix: `Render ${family === "warhol" ? "Pop" : family.charAt(0).toUpperCase() + family.slice(1)}` });
+      runNoFieldPass({ family, rerollMode: "world", statusPrefix: `Render ${FAMILY_LABELS[family] || "Studio"}` });
+      return;
+    }
+    if (btn.dataset.action === "reroll-palette") {
+      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "palette", statusPrefix: "Re-roll Palette" });
+      return;
+    }
+    if (btn.dataset.action === "reroll-world") {
+      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "world", statusPrefix: "Re-roll World" });
+      return;
+    }
+    if (btn.dataset.action === "reroll-traits") {
+      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "traits", statusPrefix: "Re-roll Traits" });
       return;
     }
     if (btn.dataset.action === "build-pop-sheet") {
@@ -1741,13 +2103,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
       state.popSheetLayout = btn.dataset.layout || "2x2";
       renderVariantPanel();
       setTopbarStatus(`Pop Sheet ${state.popSheetLayout} armed`);
-      return;
-    }
-    if (btn.dataset.action === "refresh-pair") {
-      refreshNoMinimalPreviewPair();
-      renderHeroRolePair();
-      renderVariantPanel();
-      setTopbarStatus("World recast");
     }
   });
 
@@ -1763,151 +2118,32 @@ export function mountNoStudioTool(root, shellApi = {}) {
   els.presetList.addEventListener("input", (e) => {
     const target = e.target.closest("[data-action]");
     if (!target) return;
-    if (target.dataset.action === "set-intensity") {
-      state.noFieldIntensity = Math.max(0, Math.min(100, Number(target.value) || 0));
-      scheduleVariantPanelRender();
-      return;
-    }
-    if (target.dataset.action === "set-field") {
-      state.noFieldField = Math.max(0, Math.min(100, Number(target.value) || 0));
-      scheduleVariantPanelRender();
-      return;
-    }
-    if (target.dataset.action === "set-finish") {
-      state.noFieldFinish = Math.max(0, Math.min(100, Number(target.value) || 0));
+    if (target.dataset.action === "set-family-modifier") {
+      const family = activeCreativeFamily();
+      const key = String(target.dataset.key || "");
+      if (!key) return;
+      const next = { ...(state.familyModifiers[family] || {}) };
+      next[key] = Number(target.value) || 0;
+      state.familyModifiers = {
+        ...state.familyModifiers,
+        [family]: next,
+      };
       scheduleVariantPanelRender();
     }
   });
 
-  function executeStudioProgram(programId) {
-    const sourcePalette = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
-    const weightedSubdivisions = [1, 2, 4, 4, 6, 6, 8, 8, 12, 12, 24];
-    const families = ["mono", "noir", "warhol", "acid", "pastel"];
-    const theories = ["contour", "plate", "halo", "drift"];
-    const engines = ["quiet", "balanced", "signal", "flood"];
-
-    function randomizeActiveFromPalette() {
-      const picked = pickOne(sourcePalette);
-      if (picked) {
-        setActiveColorFromHex(picked);
-        return;
-      }
-      const rgb = hslToRgb(randomInt(0, 359), randomInt(22, 90) / 100, randomInt(20, 78) / 100);
-      setActiveColorFromHex(rgbToHex(rgb.r, rgb.g, rgb.b));
-    }
-
-    function pickFamily(program) {
-      if (program.familyBias === "pop") return "warhol";
-      if (program.familyBias === "dither") return "acid";
-      if (program.familyBias === "acid" || program.familyBias === "pastel") return program.familyBias;
-      if (program.familyBias === "noir" || program.familyBias === "mono") return program.familyBias;
-      return pickOne(families) || "mono";
-    }
-
-    function pickEngine(program) {
-      if (program.ditherBias === "diffuse") return "quiet";
-      if (program.ditherBias === "mixed" || !program.ditherBias) return pickOne(engines) || "quiet";
-      if (program.ditherBias === "bayer") return "balanced";
-      if (program.ditherBias === "cluster") return "signal";
-      if (program.ditherBias === "scan") return "flood";
-      return "quiet";
-    }
-
-    function tuneIntensity(program) {
-      if (program.intensityBand === "low") {
-        state.toneStep = randomInt(2, 8);
-        state.essentialTones = randomInt(3, 4);
-        return;
-      }
-      if (program.intensityBand === "high") {
-        state.toneStep = randomInt(8, 24);
-        state.essentialTones = randomInt(4, 7);
-        return;
-      }
-      state.toneStep = randomInt(4, 16);
-      state.essentialTones = randomInt(3, 6);
-    }
-
-    const program = getStudioProgram(programId);
-    const family = pickFamily(program);
-    const theory = pickOne(theories) || "mono";
-    const engine = pickEngine(program);
-    const subdivision = pickOne(weightedSubdivisions) || 1;
-
-    randomizeActiveFromPalette();
-    state.useActiveBg = Math.random() < program.useActiveBgChance;
-    tuneIntensity(program);
-    state.activeTheory = theory;
-    state.activeDitherEngine = engine;
-    syncToneStepUI();
-    syncMinimalUI();
-    syncActiveBgToggle();
-    setSubdivisionValue(subdivision);
-
-    const applyProgramDither = (strengthMin, strengthMax) => {
-      buildTheoryFromActiveColor();
-      performDither({ strength: strengthMin + (Math.random() * (strengthMax - strengthMin)), addGrain: false });
-    };
-
-    if (program.id === "monolith") {
-      setActivePresetTab(pickOne(["mono", "noir", "pastel"]) || family);
-      state.essentialTones = 3;
-      syncMinimalUI();
-      applyCreativeVariant({ maximal: true });
-      applyStudioCut("relief-field");
-    } else if (program.id === "signal") {
-      setActivePresetTab(pickOne(["noir", "warhol", "acid"]) || family);
-      applyCreativeVariant({ maximal: false });
-      applyStudioCut("plate-shift");
-      applyProgramDither(0.68, 0.92);
-    } else if (program.id === "fracture") {
-      setSubdivisionValue(pickOne([6, 8, 12, 24]) || 8);
-      setActivePresetTab(family);
-      applyCreativeVariant({ maximal: false });
-      applyStudioCut("plate-shift");
-      applyProgramDither(0.54, 0.84);
-    } else if (program.id === "echo") {
-      setActivePresetTab(pickOne(["noir", "mono"]) || family);
-      applyCreativeVariant({ maximal: false });
-      applyStudioCut("relief-field");
-    } else if (program.id === "veil") {
-      setActivePresetTab("pastel");
-      state.essentialTones = 3;
-      syncMinimalUI();
-      applyCreativeVariant({ maximal: true });
-      applyStudioCut("relief-field");
-    } else if (program.id === "pulse") {
-      setActivePresetTab("warhol");
-      applyCreativeVariant({ maximal: false });
-      applyProgramDither(0.66, 0.88);
-    } else if (program.id === "afterimage") {
-      setActivePresetTab("noir");
-      applyCreativeVariant({ maximal: false });
-      applyStudioCut(pickOne(["relief-field", "plate-shift"]) || "relief-field");
-      applyProgramDither(0.3, 0.5);
-    } else {
-      setActivePresetTab(family);
-      state.essentialTones = randomInt(3, 5);
-      syncMinimalUI();
-      applyCreativeVariant({ maximal: Math.random() < 0.4 });
-      applyStudioCut(pickOne(["plate-shift", "relief-field"]) || "plate-shift");
-      if (Math.random() < 0.45) applyProgramDither(0.42, 0.7);
-    }
-
-    state.lastProgramId = program.id;
-    return program;
-  }
-
   function surpriseMe() {
     if (!state.selected) {
-      setServerStatus("Select a NoPunk first.", "warn");
+      setServerStatus("Select a NoPunk first.");
       return;
     }
-    const programs = listStudioPrograms();
+    const families = FAMILY_IDS.slice();
     let accepted = false;
-    let chosenProgram = getStudioProgram("poster");
+    let chosenFamily = activeCreativeFamily();
     for (let attempt = 0; attempt < 9; attempt += 1) {
-      chosenProgram = executeStudioProgram((pickOne(programs) || chosenProgram).id);
+      chosenFamily = pickOne(families) || chosenFamily;
+      setActivePresetTab(chosenFamily);
+      runNoFieldPass({ family: chosenFamily, rerollMode: "world", statusPrefix: "Cast" });
       const signature = makeCanvasOutputSignature();
       if (rememberOutputSignature(signature)) {
         accepted = true;
@@ -1919,87 +2155,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
       rememberOutputSignature(makeCanvasOutputSignature());
     }
 
-    setTopbarStatus(`Program: ${chosenProgram.label} · Δ${state.toneStep} · ${state.essentialTones} tones · ${canvas.subdivision}x${canvas.subdivision}`);
+    setTopbarStatus(`Cast · ${FAMILY_LABELS[chosenFamily] || "Studio"} · surprise world`);
     pulseStudio("surprise");
   }
 
-  els.programRail?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-program]");
-    if (!button) return;
-    if (!state.selected) {
-      setServerStatus("Select a NoPunk first.", "warn");
-      return;
-    }
-    const program = executeStudioProgram(button.dataset.program);
-    rememberOutputSignature(makeCanvasOutputSignature());
-    setTopbarStatus(`Program: ${program.label} · artist pass`);
-    pulseStudio("surprise");
-  });
-
-  els.surpriseBtn?.addEventListener("click", () => applyNoField({ holdWorld: false }));
+  els.surpriseBtn?.addEventListener("click", () => surpriseMe());
   els.heroNoMinimal?.addEventListener("click", () => applyNoMinimalism());
 
   renderPresetList();
-
-  // ── Relief Field ──────────────────────────────────────────────
-
-  function reliefTheoryLabel() {
-    const labels = {
-      contour: "Contour",
-      plate: "Plate",
-      halo: "Halo",
-      drift: "Drift",
-    };
-    return labels[state.activeTheory] || "Contour";
-  }
-
-  function reliefBiasLabel() {
-    const labels = {
-      quiet: "Quiet",
-      balanced: "Balanced",
-      signal: "Signal",
-      flood: "Flood",
-    };
-    return labels[state.activeDitherEngine] || "Quiet";
-  }
-
-  function buildTheoryFromActiveColor() {
-    refreshNoMinimalPreviewPair();
-    renderHeroRolePair();
-    setTopbarStatus(`Relief Field retuned · ${reliefTheoryLabel()} · ${reliefBiasLabel()}`);
-  }
-
-  function performDither({ strength = null, addGrain = false } = {}) {
-    if (!state.selected) return;
-    const rawAmount = strength == null
-      ? 0.58
-      : Math.max(0, Math.min(1, Number(strength)));
-
-    const fieldCut = (state.activeTheory === "plate" || state.activeTheory === "drift")
-      ? "plate-shift"
-      : "relief-field";
-    applyStudioCut(fieldCut);
-
-    const amount = Math.max(0, Math.min(1, rawAmount));
-    if (addGrain) {
-      const target = state.activeDitherEngine === "signal" ? "figure" : "background";
-      let grainAmount = 0.04 + (amount * 0.14);
-      if (state.activeDitherEngine === "quiet") grainAmount *= 0.7;
-      if (state.activeDitherEngine === "balanced") grainAmount *= 0.92;
-      if (state.activeDitherEngine === "flood") grainAmount *= 1.28;
-
-      applyDisplayGrain({
-        enabled: grainAmount > 0.02,
-        target,
-        amount: Math.min(0.28, grainAmount),
-        activeHex: target === "figure" ? nearestPaletteHex(selectedActiveHex()) : null,
-        seed: ++state.noisePass,
-      });
-    }
-
-    setTopbarStatus(`Relief Field · ${reliefTheoryLabel()} · ${reliefBiasLabel()} · ${Math.round(amount * 100)}% depth`);
-    pulseStudio("dither");
-  }
   els.applyNoise?.addEventListener("click", applyNoise);
 
   // ── Export ────────────────────────────────────────────────────
@@ -2009,8 +2172,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const grain = canvas.getDisplayGrain();
     els.exportPng.disabled = !ok;
     els.exportGif.disabled = !ok || !grain.enabled || !(grain.amount > 0);
-    if (els.saveGallery) {
-      els.saveGallery.disabled = !ok || state.gallerySaving;
+    if (els.saveGalleryPng) {
+      els.saveGalleryPng.disabled = !ok || state.gallerySaving;
+    }
+    if (els.saveGalleryGif) {
+      els.saveGalleryGif.disabled = !ok || state.gallerySaving || !grain.enabled || !(grain.amount > 0);
     }
     els.exportReset.disabled = !ok;
   }
@@ -2120,8 +2286,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
     setTopbarStatus("Stage reset · grain cleared");
   });
 
-  els.saveGallery?.addEventListener("click", () => {
-    saveCurrentToGallery();
+  els.saveGalleryPng?.addEventListener("click", () => {
+    saveCurrentToGallery({ mediaKind: "png" });
+  });
+
+  els.saveGalleryGif?.addEventListener("click", () => {
+    saveCurrentToGallery({ mediaKind: "gif" });
+  });
+
+  els.gallerySignature?.addEventListener("change", () => {
+    const normalized = normalizeSignatureHandle(els.gallerySignature.value);
+    state.gallerySignature = normalized;
+    els.gallerySignature.value = normalized;
+    persistSession();
   });
 
   els.galleryRefresh?.addEventListener("click", () => {
@@ -2156,6 +2333,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.originalOccupied = null;
     state.sourceClassifiedPalette = null;
     state.sourcePaletteHexes = [];
+    state.sourceRoleByHex = new Map();
     state.noMinimalPreviewPair = null;
     canvas.clearDisplayGrain();
     state.variantByFamily = { mono: null, noir: null, warhol: null, acid: null, pastel: null };
@@ -2184,6 +2362,22 @@ export function mountNoStudioTool(root, shellApi = {}) {
       canvas.loadImageData(imageData);
       state.sourceClassifiedPalette = canvas.getClassifiedPalette().map((entry) => ({ ...entry }));
       state.sourcePaletteHexes = canvas.getCurrentPalette().slice();
+      state.sourceRoleByHex = new Map(
+        (state.sourceClassifiedPalette || []).map((entry) => [String(entry.hex || "").toUpperCase(), String(entry.role || "body")]),
+      );
+      const validSourceHexes = new Set(state.sourcePaletteHexes.map((hex) => String(hex || "").toUpperCase()));
+      const filteredMap = {};
+      for (const [sourceHex, targetHex] of Object.entries(state.curatedPaletteMap || {})) {
+        const source = String(sourceHex || "").toUpperCase();
+        const target = String(targetHex || "").toUpperCase();
+        if (!validSourceHexes.has(source)) continue;
+        if (!/^#[0-9A-F]{6}$/.test(target)) continue;
+        filteredMap[source] = target;
+      }
+      state.curatedPaletteMap = filteredMap;
+      if (!validSourceHexes.has(String(state.curationSourceHex || "").toUpperCase())) {
+        state.curationSourceHex = null;
+      }
       refreshNoMinimalPreviewPair();
       renderHeroRolePair();
       updatePaletteGrid();
@@ -2204,27 +2398,48 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (savedSession.activePresetTab) state.activePresetTab = savedSession.activePresetTab;
     if (savedSession.activeColor) state.activeColor = savedSession.activeColor;
     if (savedSession.activeColorHex) state.activeColorHex = savedSession.activeColorHex;
-    if (savedSession.userSubdivision != null) state.userSubdivision = savedSession.userSubdivision;
-    if (savedSession.toneStep != null) state.toneStep = clampToneStep(savedSession.toneStep);
-    if (savedSession.essentialTones != null) state.essentialTones = clampEssentialTones(savedSession.essentialTones);
     if (savedSession.noMinimalDeltaMode) state.noMinimalDeltaMode = savedSession.noMinimalDeltaMode;
     if (savedSession.useActiveBg != null) state.useActiveBg = savedSession.useActiveBg;
-    if (savedSession.activeNoiseTarget) state.activeNoiseTarget = savedSession.activeNoiseTarget;
-    if (savedSession.noiseAmount != null) state.noiseAmount = savedSession.noiseAmount;
-    if (savedSession.noFieldIntensity != null) state.noFieldIntensity = savedSession.noFieldIntensity;
-    if (savedSession.noFieldField != null) state.noFieldField = savedSession.noFieldField;
-    if (savedSession.noFieldFinish != null) state.noFieldFinish = savedSession.noFieldFinish;
+    if (savedSession.globalModifiers && typeof savedSession.globalModifiers === "object") {
+      state.globalModifiers = {
+        ...state.globalModifiers,
+        ...savedSession.globalModifiers,
+      };
+    }
+    if (savedSession.familyModifiers && typeof savedSession.familyModifiers === "object") {
+      state.familyModifiers = {
+        ...state.familyModifiers,
+        ...savedSession.familyModifiers,
+      };
+    }
+    state.activeNoiseTarget = state.globalModifiers.grainTarget || state.activeNoiseTarget;
+    state.noiseAmount = Number(state.globalModifiers.grainAmount ?? state.noiseAmount) || state.noiseAmount;
     if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
+    if (savedSession.gallerySignature) {
+      state.gallerySignature = normalizeSignatureHandle(savedSession.gallerySignature);
+    }
+    if (savedSession.curatedPaletteMap && typeof savedSession.curatedPaletteMap === "object") {
+      const nextMap = {};
+      for (const [sourceHex, targetHex] of Object.entries(savedSession.curatedPaletteMap)) {
+        const source = String(sourceHex || "").trim().toUpperCase();
+        const target = String(targetHex || "").trim().toUpperCase();
+        if (!/^#[0-9A-F]{6}$/.test(source) || !/^#[0-9A-F]{6}$/.test(target)) continue;
+        nextMap[source] = target;
+      }
+      state.curatedPaletteMap = nextMap;
+    }
+    if (/^#[0-9A-F]{6}$/.test(String(savedSession.curationSourceHex || "").toUpperCase())) {
+      state.curationSourceHex = String(savedSession.curationSourceHex).toUpperCase();
+    }
     syncColorUI();
-    syncToneStepUI();
-    syncMinimalUI();
+    syncGlobalModifierUI();
     syncActiveBgToggle();
     renderNoMinimalModeRail();
     renderNoiseTargetRail();
-    setSubdivisionValue(state.userSubdivision);
     setActivePresetTab(state.activePresetTab);
     if (els.noiseAmount) els.noiseAmount.value = String(state.noiseAmount);
     if (els.noiseAmountValue) els.noiseAmountValue.textContent = `${state.noiseAmount}%`;
+    if (els.gallerySignature) els.gallerySignature.value = state.gallerySignature;
     if (savedSession.selectedId != null) {
       searchPunks(String(savedSession.selectedId), 1)
         .then((payload) => {

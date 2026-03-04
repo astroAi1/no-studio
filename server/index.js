@@ -4,6 +4,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
+const zlib = require("zlib");
 const { URL } = require("url");
 
 const { NoPaletteDatabase } = require("./lib/nopalette/db");
@@ -238,7 +239,7 @@ function parseBody(req) {
     let raw = "";
     req.on("data", (chunk) => {
       raw += chunk;
-      if (raw.length > 10_000_000) {
+      if (raw.length > 50_000_000) {
         reject(new Error("Request body too large"));
         req.destroy();
       }
@@ -308,23 +309,239 @@ function sanitizeText(value, maxLength = 140) {
     .slice(0, maxLength);
 }
 
+function normalizeCurationLabel(value, tokenId = 0) {
+  const raw = sanitizeText(value, 160) || `No-Studio #${Number(tokenId) || 0}`;
+  return raw.replace(/\bsurprise\s+world\b/gi, "No-Curation");
+}
+
+function sanitizeSignatureHandle(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^a-zA-Z0-9_]/g, "")
+    .slice(0, 15);
+  return cleaned ? `@${cleaned}` : "";
+}
+
+function sanitizeHexColor(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  return /^#[0-9A-F]{6}$/.test(raw) ? raw : null;
+}
+
+function sanitizePalette(value) {
+  if (!Array.isArray(value)) return [];
+  const dedupe = new Set();
+  const out = [];
+  for (const entry of value) {
+    const hex = sanitizeHexColor(entry);
+    if (!hex || dedupe.has(hex)) continue;
+    dedupe.add(hex);
+    out.push(hex);
+    if (out.length >= 64) break;
+  }
+  return out;
+}
+
+function rgbToHex(r, g, b) {
+  return `#${[r, g, b].map((value) => Number(value).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+}
+
+function paethPredictor(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+function extractPaletteFromPng(buffer, limit = 64) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) return [];
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (!buffer.subarray(0, 8).equals(signature)) return [];
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  let paletteTable = null;
+  const idatParts = [];
+
+  for (let offset = 8; offset + 8 <= buffer.length;) {
+    const chunkLength = buffer.readUInt32BE(offset);
+    const chunkType = buffer.toString("ascii", offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + chunkLength;
+    const crcEnd = dataEnd + 4;
+    if (dataEnd > buffer.length || crcEnd > buffer.length) return [];
+    const chunkData = buffer.subarray(dataStart, dataEnd);
+
+    if (chunkType === "IHDR" && chunkData.length >= 13) {
+      width = chunkData.readUInt32BE(0);
+      height = chunkData.readUInt32BE(4);
+      bitDepth = chunkData[8];
+      colorType = chunkData[9];
+      interlace = chunkData[12];
+    } else if (chunkType === "PLTE") {
+      paletteTable = chunkData;
+    } else if (chunkType === "IDAT") {
+      idatParts.push(chunkData);
+    } else if (chunkType === "IEND") {
+      break;
+    }
+
+    offset = crcEnd;
+  }
+
+  if (!width || !height || !idatParts.length) return [];
+  if (interlace !== 0 || bitDepth !== 8) return [];
+
+  const bytesPerPixelByType = {
+    0: 1, // grayscale
+    2: 3, // truecolor
+    3: 1, // indexed
+    4: 2, // grayscale + alpha
+    6: 4, // truecolor + alpha
+  };
+  const bpp = bytesPerPixelByType[colorType];
+  if (!bpp) return [];
+
+  let inflated;
+  try {
+    inflated = zlib.inflateSync(Buffer.concat(idatParts));
+  } catch {
+    return [];
+  }
+
+  const rowLen = width * bpp;
+  const expectedMin = (rowLen + 1) * height;
+  if (inflated.length < expectedMin) return [];
+
+  const seen = new Set();
+  const palette = [];
+  const addHex = (r, g, b, a = 255) => {
+    if (a === 0) return;
+    const hex = rgbToHex(r, g, b);
+    if (seen.has(hex)) return;
+    seen.add(hex);
+    palette.push(hex);
+  };
+
+  let pos = 0;
+  let prev = new Uint8Array(rowLen);
+
+  for (let y = 0; y < height; y += 1) {
+    const filterType = inflated[pos];
+    pos += 1;
+    if (pos + rowLen > inflated.length) return [];
+    const rowIn = inflated.subarray(pos, pos + rowLen);
+    pos += rowLen;
+    const rowOut = new Uint8Array(rowLen);
+
+    for (let i = 0; i < rowLen; i += 1) {
+      const raw = rowIn[i];
+      const left = i >= bpp ? rowOut[i - bpp] : 0;
+      const up = prev[i] || 0;
+      const upLeft = i >= bpp ? (prev[i - bpp] || 0) : 0;
+      if (filterType === 0) {
+        rowOut[i] = raw;
+      } else if (filterType === 1) {
+        rowOut[i] = (raw + left) & 0xff;
+      } else if (filterType === 2) {
+        rowOut[i] = (raw + up) & 0xff;
+      } else if (filterType === 3) {
+        rowOut[i] = (raw + Math.floor((left + up) / 2)) & 0xff;
+      } else if (filterType === 4) {
+        rowOut[i] = (raw + paethPredictor(left, up, upLeft)) & 0xff;
+      } else {
+        return [];
+      }
+    }
+
+    for (let x = 0; x < width; x += 1) {
+      const base = x * bpp;
+      if (colorType === 6) {
+        addHex(rowOut[base], rowOut[base + 1], rowOut[base + 2], rowOut[base + 3]);
+      } else if (colorType === 2) {
+        addHex(rowOut[base], rowOut[base + 1], rowOut[base + 2], 255);
+      } else if (colorType === 4) {
+        const gray = rowOut[base];
+        addHex(gray, gray, gray, rowOut[base + 1]);
+      } else if (colorType === 0) {
+        const gray = rowOut[base];
+        addHex(gray, gray, gray, 255);
+      } else if (colorType === 3) {
+        const idx = rowOut[base] * 3;
+        if (!paletteTable || idx + 2 >= paletteTable.length) continue;
+        addHex(paletteTable[idx], paletteTable[idx + 1], paletteTable[idx + 2], 255);
+      }
+      if (palette.length >= limit) return palette;
+    }
+
+    prev = rowOut;
+  }
+
+  return palette;
+}
+
+function inferPaletteFromMediaBuffer(buffer, mediaType) {
+  if (String(mediaType || "").toLowerCase() === "png") {
+    return sanitizePalette(extractPaletteFromPng(buffer, 64));
+  }
+  return [];
+}
+
+function inferPaletteFromGalleryFile(fileName) {
+  const safeName = String(fileName || "");
+  if (!/^[a-zA-Z0-9._-]+\.(png|gif)$/i.test(safeName)) return [];
+  const filePath = path.join(NO_GALLERY_ROOT, safeName);
+  if (!filePath.startsWith(NO_GALLERY_ROOT) || !fs.existsSync(filePath)) return [];
+  const mediaType = safeName.toLowerCase().endsWith(".gif") ? "gif" : "png";
+  try {
+    return inferPaletteFromMediaBuffer(fs.readFileSync(filePath), mediaType);
+  } catch {
+    return [];
+  }
+}
+
 function galleryItemUrls(fileName, useNoStudioPrefix) {
   const prefix = useNoStudioPrefix ? "/api/no-studio" : "/api/no-palette";
   const encoded = encodeURIComponent(fileName);
+  const mediaUrl = `${prefix}/gallery/files/${encoded}`;
+  const isGif = fileName.toLowerCase().endsWith(".gif");
   return {
-    pngUrl: `${prefix}/gallery/files/${encoded}`,
-    viewUrl: `${prefix}/gallery/files/${encoded}`,
+    mediaUrl,
+    thumbUrl: mediaUrl,
+    viewUrl: mediaUrl,
+    mediaType: isGif ? "gif" : "png",
+    pngUrl: isGif ? null : mediaUrl,
+    gifUrl: isGif ? mediaUrl : null,
   };
 }
 
 function normalizeGalleryEntry(entry, useNoStudioPrefix) {
   const fileName = String(entry.fileName || "");
+  const signatureHandle = sanitizeSignatureHandle(
+    entry.signatureHandle || entry.signature || entry.twitterHandle || "",
+  );
+  let palette = sanitizePalette(entry.palette || entry.paletteHexes || []);
+  const inferred = inferPaletteFromGalleryFile(fileName);
+  if (inferred.length && inferred.length > palette.length) {
+    palette = inferred;
+  } else if (!palette.length) {
+    palette = inferred;
+  }
   return {
     id: String(entry.id || ""),
     tokenId: Number(entry.tokenId) || 0,
     family: sanitizeText(entry.family, 32),
-    label: sanitizeText(entry.label, 160),
+    label: normalizeCurationLabel(entry.label, entry.tokenId),
     createdAt: entry.createdAt,
+    signatureHandle,
+    palette,
+    paletteCount: palette.length,
     rolePair: entry.rolePair && typeof entry.rolePair === "object"
       ? {
           background: sanitizeText(entry.rolePair.background, 7),
@@ -336,21 +553,37 @@ function normalizeGalleryEntry(entry, useNoStudioPrefix) {
   };
 }
 
-function saveNoGalleryEntry({ tokenId, pngDataUrl, label, family, rolePair }, useNoStudioPrefix) {
-  const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(pngDataUrl || ""));
+function saveNoGalleryEntry({
+  tokenId,
+  mediaDataUrl,
+  pngDataUrl,
+  gifDataUrl,
+  label,
+  family,
+  rolePair,
+  signatureHandle,
+  signature,
+  twitterHandle,
+  palette,
+  paletteHexes,
+}, useNoStudioPrefix) {
+  const rawDataUrl = String(mediaDataUrl || gifDataUrl || pngDataUrl || "");
+  const match = /^data:image\/(png|gif);base64,([A-Za-z0-9+/=]+)$/.exec(rawDataUrl);
   if (!match) {
-    throw new Error("Invalid PNG payload");
+    throw new Error("Invalid media payload");
   }
-  const imageBuffer = Buffer.from(match[1], "base64");
+  const mediaType = String(match[1]).toLowerCase();
+  const imageBuffer = Buffer.from(match[2], "base64");
   if (!imageBuffer.length) {
-    throw new Error("Empty PNG payload");
+    throw new Error("Empty media payload");
   }
-  if (imageBuffer.length > 8_000_000) {
-    throw new Error("PNG too large");
+  const maxBytes = mediaType === "gif" ? 24_000_000 : 8_000_000;
+  if (imageBuffer.length > maxBytes) {
+    throw new Error(mediaType === "gif" ? "GIF too large" : "PNG too large");
   }
 
   const id = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
-  const fileName = `no-gallery-${id}.png`;
+  const fileName = `no-gallery-${id}.${mediaType}`;
   const filePath = path.join(NO_GALLERY_ROOT, fileName);
   if (!filePath.startsWith(NO_GALLERY_ROOT)) {
     throw new Error("Invalid gallery path");
@@ -358,13 +591,25 @@ function saveNoGalleryEntry({ tokenId, pngDataUrl, label, family, rolePair }, us
   fs.writeFileSync(filePath, imageBuffer);
 
   const entries = readNoGalleryEntries();
+  const normalizedSignature = sanitizeSignatureHandle(
+    signatureHandle || signature || twitterHandle || "",
+  );
+  let normalizedPalette = sanitizePalette(palette || paletteHexes || []);
+  const inferredPalette = inferPaletteFromMediaBuffer(imageBuffer, mediaType);
+  if (inferredPalette.length && inferredPalette.length > normalizedPalette.length) {
+    normalizedPalette = inferredPalette;
+  } else if (!normalizedPalette.length) {
+    normalizedPalette = inferredPalette;
+  }
   const nextEntry = {
     id,
     fileName,
     tokenId: Number(tokenId) || 0,
     family: sanitizeText(family, 32),
-    label: sanitizeText(label, 160) || `No-Studio #${Number(tokenId) || 0}`,
+    label: normalizeCurationLabel(label, tokenId),
     createdAt: new Date().toISOString(),
+    signatureHandle: normalizedSignature,
+    palette: normalizedPalette,
     rolePair: rolePair && typeof rolePair === "object"
       ? {
           background: sanitizeText(rolePair.background, 7),
@@ -477,7 +722,20 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
       if (method === "GET" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
         const limit = clampInt(url.searchParams.get("limit") || 18, 1, 60);
         const useNoStudioPrefix = pathname.startsWith("/api/no-studio/");
-        const items = readNoGalleryEntries()
+        const entries = readNoGalleryEntries();
+        let mutated = false;
+        for (const entry of entries) {
+          const current = sanitizePalette(entry && (entry.palette || entry.paletteHexes || []));
+          const inferred = inferPaletteFromGalleryFile(entry && entry.fileName);
+          if (inferred.length && inferred.length > current.length) {
+            entry.palette = inferred;
+            mutated = true;
+          }
+        }
+        if (mutated) {
+          writeNoGalleryEntries(entries);
+        }
+        const items = entries
           .slice(0, limit)
           .map((entry) => normalizeGalleryEntry(entry, useNoStudioPrefix));
         return sendJson(res, 200, {
@@ -489,15 +747,16 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
 
       if ((method === "GET" || method === "HEAD") && (pathname.startsWith("/api/no-palette/gallery/files/") || pathname.startsWith("/api/no-studio/gallery/files/"))) {
         const fileName = decodeURIComponent(pathname.split("/").pop() || "");
-        if (!/^[a-zA-Z0-9._-]+\.png$/.test(fileName)) {
+        if (!/^[a-zA-Z0-9._-]+\.(png|gif)$/i.test(fileName)) {
           return sendJson(res, 400, { ok: false, error: "Invalid gallery file name" });
         }
         const filePath = path.join(NO_GALLERY_ROOT, fileName);
         if (!filePath.startsWith(NO_GALLERY_ROOT) || !fs.existsSync(filePath)) {
           return sendJson(res, 404, { ok: false, error: "Gallery file not found" });
         }
+        const lower = fileName.toLowerCase();
         const headers = {
-          "content-type": "image/png",
+          "content-type": lower.endsWith(".gif") ? "image/gif" : "image/png",
           "cache-control": "no-store",
         };
         if (url.searchParams.get("download") === "1") {
@@ -672,10 +931,17 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
         if (!record) return sendJson(res, 404, { ok: false, error: "NoPunk not found" });
         const entry = saveNoGalleryEntry({
           tokenId: id,
+          mediaDataUrl: body && body.mediaDataUrl,
           pngDataUrl: body && body.pngDataUrl,
+          gifDataUrl: body && body.gifDataUrl,
           label: body && body.label,
           family: body && body.family,
           rolePair: body && body.rolePair,
+          signatureHandle: body && body.signatureHandle,
+          signature: body && body.signature,
+          twitterHandle: body && body.twitterHandle,
+          palette: body && body.palette,
+          paletteHexes: body && body.paletteHexes,
         }, pathname.startsWith("/api/no-studio/"));
         return sendJson(res, 200, {
           ok: true,

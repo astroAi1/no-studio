@@ -469,6 +469,7 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
       contrast,
       huePhase,
       accentPulse,
+      variantPhase: randomBetween(0, Math.PI * 2),
       ui: {
         family: "Mono",
         chips: [
@@ -490,6 +491,10 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
     const bodyPulse = randomBetween(0.08, 0.42);
     const accentPulse = randomBetween(1, 4);
     const depthBias = randomBetween(-0.035, -0.005);
+    const depthLayers = randomInt(3, 7);
+    const chiaroscuro = randomBetween(0.25, 0.92);
+    const voidBias = randomBetween(0.18, 0.66);
+    const spectralTilt = randomBetween(-26, 26);
     const preset = {
       id: `noir-random-${Math.floor(randomUnit() * 1e9)}`,
       name: makeVariantName("noir"),
@@ -508,12 +513,18 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
       bodyPulse,
       accentPulse,
       depthBias,
+      depthLayers,
+      chiaroscuro,
+      voidBias,
+      spectralTilt,
+      variantPhase: randomBetween(0, Math.PI * 2),
       ui: {
         family: "Noir",
         chips: [
           `Anchor ${anchorHex}`,
           `Base ${Math.round(baseHue)}°`,
           `Accent +${Math.round(accentHueShift)}° / Pulse ${Math.round(accentPulse)}°`,
+          `${depthLayers} strata · ${Math.round(chiaroscuro * 100)}% depth`,
           `${Math.round(curve * 100)}% curve · ${Math.round((depthBias + 0.05) * 100)}% lift`,
         ],
       },
@@ -547,6 +558,7 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
       contrast,
       huePhase,
       accentPulse,
+      variantPhase: randomBetween(0, Math.PI * 2),
       ui: {
         family: "Pastel",
         chips: [
@@ -584,6 +596,7 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
       lumaSpread,
       bgHueShift,
       bgContrast,
+      variantPhase: randomBetween(0, Math.PI * 2),
       ui: {
         family: "Acid",
         chips: [
@@ -620,6 +633,7 @@ export function createRandomPreset(family, { activeHex = null, sourcePalette = [
     lumaSpread,
     bgHueShift,
     bgContrast,
+    variantPhase: randomBetween(0, Math.PI * 2),
     ui: {
       family: "Pop",
       chips: [

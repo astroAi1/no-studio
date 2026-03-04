@@ -1,5 +1,5 @@
 const PRIMARY_TOOL = "no-studio";
-const VALID_TOOLS = new Set([PRIMARY_TOOL]);
+const VALID_TOOLS = new Set([PRIMARY_TOOL, "no-gallery"]);
 const LEGACY_ALIASES = new Map([
   ["no-palette", PRIMARY_TOOL],
   ["no-generate", PRIMARY_TOOL],

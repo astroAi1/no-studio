@@ -1,5 +1,6 @@
 import { getHealth } from "./api.js";
 import { mountNoStudioTool } from "./tools/no-studio.js";
+import { mountNoGalleryPage } from "./tools/no-gallery.js";
 
 const root = document.getElementById("studio-root");
 let currentCleanup = null;
@@ -32,7 +33,11 @@ async function boot() {
   }
 
   try {
-    currentCleanup = mountNoStudioTool(root);
+    const rawPath = String(window.location.pathname || "/").replace(/\/+$/, "") || "/";
+    const isGallery = rawPath === "/tools/no-gallery" || rawPath === "/no-gallery";
+    currentCleanup = isGallery
+      ? mountNoGalleryPage(root)
+      : mountNoStudioTool(root);
   } catch (error) {
     showFatalError(error);
   }

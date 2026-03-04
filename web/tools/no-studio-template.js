@@ -1,10 +1,6 @@
 // no-studio-template.js — HTML template for No-Studio tool
 
-export function createStudioTemplate({ subdivisions, defaultToneStep }) {
-  const subdivBtns = subdivisions.map((s) =>
-    `<button class="topbar-btn${s.value === 1 ? " is-active" : ""}" data-subdiv="${s.value}">${s.label}</button>`
-  ).join("");
-
+export function createStudioTemplate() {
   return `
     <div class="studio" data-role="studio">
       <!-- Toolbar -->
@@ -40,11 +36,6 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
           <span class="topbar-kicker">Noir de Noir</span>
           <span class="topbar-brand">NO-STUDIO</span>
           <span class="topbar-brand-note">Original source. Studio-grade casts.</span>
-        </div>
-        <div class="topbar-sep"></div>
-        <div class="topbar-group topbar-group--grid">
-          <span class="topbar-label">Grid</span>
-          ${subdivBtns}
         </div>
         <div class="topbar-sep"></div>
         <div class="topbar-group topbar-group--history">
@@ -136,17 +127,38 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
         <div class="sidebar-section" data-role="palette-section">
           <div class="sidebar-heading">Palette</div>
           <div class="palette-grid" data-role="palette-grid"></div>
+          <div class="palette-curation">
+            <div class="palette-curation-readout" data-role="palette-curation-readout">
+              Pick a source swatch, then map it to your active color.
+            </div>
+            <div class="palette-curation-actions">
+              <button class="preset-btn" type="button" data-role="curation-map-active">Map Active</button>
+              <button class="preset-btn" type="button" data-role="curation-clear-mapping">Clear Map</button>
+            </div>
+            <div class="palette-curation-actions">
+              <button class="preset-btn preset-btn--hero" type="button" data-role="curation-apply">Apply Curated Palette</button>
+              <button class="preset-btn" type="button" data-role="curation-reset-all">Reset Curation</button>
+            </div>
+          </div>
         </div>
 
         <!-- Studio Dock -->
         <div class="sidebar-section studio-dock-section" data-role="studio-dock-section">
-          <div class="sidebar-heading">Studio Deck <span class="dock-sub-heading" style="margin:0;display:inline" data-role="preset-grid-label">(grid: 1x1)</span></div>
+          <div class="sidebar-heading">Studio Deck</div>
           <span class="deck-family-kicker" data-role="deck-family-kicker">Mono</span>
           <div class="studio-hero-actions">
-            <button class="preset-btn preset-btn--hero" type="button" data-role="surprise-btn" title="Randomize everything \u2014 palette family, grid, colours \u2014 and render in one click">Cast</button>
+            <button class="preset-btn preset-btn--hero" type="button" data-role="surprise-btn" title="Machine-random family and cast from original source">Cast</button>
             <button class="preset-btn preset-btn--signature" type="button" data-role="hero-no-minimal" title="Reduce the punk to just 2 tones: a background colour and a near-identical outline. The signature NoPunks look.">No-Minimalism</button>
           </div>
-          <button class="preset-btn preset-btn--gallery" type="button" data-role="save-gallery" disabled>Save To No-Gallery</button>
+          <label class="gallery-signature-field" for="gallery-signature-input">
+            <span class="gallery-signature-label">Sign (optional)</span>
+            <input id="gallery-signature-input" name="gallery_signature" class="gallery-signature-input" data-role="gallery-signature" type="text" placeholder="@yourhandle" maxlength="16" autocomplete="off" />
+          </label>
+          <div class="gallery-save-actions">
+            <button class="preset-btn preset-btn--gallery" type="button" data-role="save-gallery-png" disabled>Save PNG To No-Gallery</button>
+            <button class="preset-btn preset-btn--gallery" type="button" data-role="save-gallery-gif" disabled>Save GIF To No-Gallery</button>
+            <a class="preset-btn preset-btn--gallery-link" data-role="open-gallery-link" href="/tools/no-gallery">Open No-Gallery</a>
+          </div>
           <div class="role-pair-readout hero-role-pair" data-role="hero-role-pair"></div>
           <div class="deck-palette-label">Palette family</div>
           <div class="preset-tabs">
@@ -160,28 +172,27 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
             <summary class="dock-advanced-summary">Studio Modifiers</summary>
             <div class="dock-advanced-body">
               <div class="modifier-group">
-                <div class="dock-sub-heading">Programs</div>
-                <div class="mini-note">Pre-built recipes that randomize palette, grid, and effects in one click.</div>
-                <div class="theory-rail program-rail" data-role="program-rail">
-                  <button class="theory-btn" type="button" data-program="monolith" title="Minimal 3-tone reduction. Stark, poster-flat.">Monolith</button>
-                  <button class="theory-btn" type="button" data-program="veil" title="Soft pastel wash. Quiet, airy, low contrast.">Veil</button>
-                  <button class="theory-btn" type="button" data-program="poster" title="Bold pop colours. High contrast, graphic punch.">Poster</button>
-                  <button class="theory-btn" type="button" data-program="signal" title="Noisy acid texture. Dithered grain, scan lines.">Signal</button>
-                </div>
-              </div>
-              <div class="modifier-divider"></div>
-              <div class="modifier-group">
-                <div class="dock-sub-heading">Tone</div>
-                <div class="mini-note">Contrast between layers and how many colours survive the reduction.</div>
+                <div class="dock-sub-heading">Global</div>
+                <div class="mini-note">These apply in fixed order to every family pass.</div>
                 <div class="color-slider-row">
-                  <span class="color-slider-label">\u0394</span>
-                  <input type="range" class="color-slider" data-role="tone-step-slider" min="1" max="24" value="${defaultToneStep}" />
-                  <span class="color-slider-value" data-role="tone-step-value">${defaultToneStep}</span>
+                  <span class="color-slider-label">Tone</span>
+                  <input type="range" class="color-slider" data-role="global-tone-count" min="2" max="8" value="5" />
+                  <span class="color-slider-value" data-role="global-tone-count-value">5</span>
                 </div>
                 <div class="color-slider-row">
-                  <span class="color-slider-label">Min</span>
-                  <input type="range" class="color-slider" data-role="minimal-slider" min="3" max="8" value="4" />
-                  <span class="color-slider-value" data-role="minimal-value">4</span>
+                  <span class="color-slider-label">Cont</span>
+                  <input type="range" class="color-slider" data-role="global-contrast" min="0" max="100" value="62" />
+                  <span class="color-slider-value" data-role="global-contrast-value">62%</span>
+                </div>
+                <div class="color-slider-row">
+                  <span class="color-slider-label">Trait</span>
+                  <input type="range" class="color-slider" data-role="global-trait-focus" min="0" max="100" value="54" />
+                  <span class="color-slider-value" data-role="global-trait-focus-value">54%</span>
+                </div>
+                <div class="color-slider-row">
+                  <span class="color-slider-label">Drift</span>
+                  <input type="range" class="color-slider" data-role="global-palette-drift" min="0" max="100" value="28" />
+                  <span class="color-slider-value" data-role="global-palette-drift-value">28%</span>
                 </div>
                 <div class="dock-sub-heading">Twin Lift</div>
                 <div class="mini-note">Outline tracking mode. Exact = fixed offset. Soft = drift. Hard = max separation.</div>
@@ -190,6 +201,12 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
                   <button class="theory-btn" type="button" data-minimal-mode="soft">Soft</button>
                   <button class="theory-btn" type="button" data-minimal-mode="hard">Hard</button>
                 </div>
+              </div>
+              <div class="modifier-divider"></div>
+              <div class="modifier-group">
+                <div class="dock-sub-heading">Family Specific</div>
+                <div class="mini-note">Each family has two dedicated controls that affect unique stages.</div>
+                <div data-role="family-modifiers-panel"></div>
               </div>
               <div class="modifier-divider"></div>
               <div class="modifier-group">
@@ -207,7 +224,7 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
                 </div>
                 <button class="export-btn export-btn--full" data-role="apply-noise">Apply Grain</button>
               </div>
-              <button class="preset-btn" type="button" data-role="active-bg-toggle">Active BG for Pop \u00b7 Off</button>
+              <button class="preset-btn" type="button" data-role="active-bg-toggle">Use Active Color As Background \u00b7 Off</button>
             </div>
           </details>
           <div class="preset-list" data-role="preset-list"></div>
@@ -226,7 +243,10 @@ export function createStudioTemplate({ subdivisions, defaultToneStep }) {
         <div class="sidebar-section" data-role="gallery-section">
           <div class="gallery-head">
             <div class="sidebar-heading" style="margin-bottom:0">No-Gallery</div>
-            <button class="gallery-refresh" type="button" data-role="gallery-refresh">Refresh</button>
+            <div class="gallery-head-actions">
+              <button class="gallery-refresh" type="button" data-role="gallery-refresh">Refresh</button>
+              <a class="gallery-open-link" href="/tools/no-gallery">Open</a>
+            </div>
           </div>
           <div class="gallery-list" data-role="gallery-list">
             <div class="gallery-empty">Cast something worth keeping, then save it here.</div>
