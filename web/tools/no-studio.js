@@ -164,32 +164,44 @@ function posterizeScreenPrint(imageData, occupied) {
   const h = imageData.height;
   const src = imageData.data;
   const out = new Uint8ClampedArray(src);
+
+  // Collect distinct colors + measure luminance range
   const colorMap = new Map();
+  let lumaMin = 255;
+  let lumaMax = 0;
   for (let y = 0; y < h; y += 1) {
     for (let x = 0; x < w; x += 1) {
       if (!occupied.has(`${x},${y}`)) continue;
       const i = (y * w + x) * 4;
       const key = (src[i] << 16) | (src[i + 1] << 8) | src[i + 2];
+      const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2];
+      if (luma < lumaMin) lumaMin = luma;
+      if (luma > lumaMax) lumaMax = luma;
       if (!colorMap.has(key)) {
-        colorMap.set(key, { r: src[i], g: src[i + 1], b: src[i + 2] });
+        colorMap.set(key, { r: src[i], g: src[i + 1], b: src[i + 2], luma });
       }
     }
   }
-  const allColors = Array.from(colorMap.values())
-    .sort((a, b) => (0.2126 * a.r + 0.7152 * a.g + 0.0722 * a.b) - (0.2126 * b.r + 0.7152 * b.g + 0.0722 * b.b));
+  const allColors = Array.from(colorMap.values()).sort((a, b) => a.luma - b.luma);
   if (allColors.length < 2) return imageData;
+
+  // Pick 4 ink colors evenly across luminance-sorted palette
   const inkCount = Math.min(4, allColors.length);
   const inks = [];
   for (let i = 0; i < inkCount; i += 1) {
     const idx = Math.round((i / (inkCount - 1)) * (allColors.length - 1));
     inks.push(allColors[idx]);
   }
+
+  // Snap each pixel to nearest ink by luminance, normalized to actual range
+  const lumaRange = Math.max(1, lumaMax - lumaMin);
   for (let y = 0; y < h; y += 1) {
     for (let x = 0; x < w; x += 1) {
       if (!occupied.has(`${x},${y}`)) continue;
       const i = (y * w + x) * 4;
       const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2];
-      const band = Math.min(inkCount - 1, Math.floor((luma / 255) * inkCount));
+      const normalized = (luma - lumaMin) / lumaRange;
+      const band = Math.min(inkCount - 1, Math.floor(normalized * inkCount));
       out[i] = inks[band].r;
       out[i + 1] = inks[band].g;
       out[i + 2] = inks[band].b;
@@ -1456,6 +1468,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       };
     });
 
+    const occupiedSet = getOccupiedPixels(source);
     const tiles = panelResults.map((panel) => {
       const tile = new Uint8ClampedArray(source.data.length);
       for (let y = 0; y < source.height; y += 1) {
@@ -1480,7 +1493,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
           tile[idx + 3] = 255;
         }
       }
-      return new ImageData(tile, source.width, source.height);
+      return posterizeScreenPrint(new ImageData(tile, source.width, source.height), occupiedSet);
     });
 
     state.variantByFamily.warhol = panelResults[0]?.preset || null;
