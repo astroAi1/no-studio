@@ -16,14 +16,17 @@ const STATIC_STUDIO_CONFIG = {
 
 let staticTraitDbPromise = null;
 let staticPunkIndexPromise = null;
-const BROWSER_GALLERY_KEY = "no-studio-browser-gallery-v1";
+const BROWSER_GALLERY_KEY = "no-studio-browser-gallery-v3";
 const BROWSER_GALLERY_LIMIT = 60;
-const BROWSER_GALLERY_DB_NAME = "no-studio-gallery-v1";
+const BROWSER_GALLERY_DB_NAME = "no-studio-gallery-v3";
 const BROWSER_GALLERY_DB_VERSION = 1;
 const BROWSER_GALLERY_STORE = "entries";
+const BROWSER_GALLERY_LEGACY_KEYS = ["no-studio-browser-gallery-v1", "no-studio-browser-gallery-v2"];
+const BROWSER_GALLERY_LEGACY_DBS = ["no-studio-gallery-v1", "no-studio-gallery-v2"];
 const GALLERY_REQUEST_TIMEOUT_MS = 4500;
 let browserGalleryDbPromise = null;
 let browserGalleryMigrationDone = false;
+let browserGalleryLegacyPurgeDone = false;
 let sharedGalleryUnavailable = false;
 
 export async function fetchJson(url, options = {}) {
@@ -294,6 +297,25 @@ async function writeBrowserGalleryToDb(entries) {
 async function migrateLegacyBrowserGalleryToDb() {
   if (browserGalleryMigrationDone) return;
   browserGalleryMigrationDone = true;
+  if (!browserGalleryLegacyPurgeDone) {
+    browserGalleryLegacyPurgeDone = true;
+    try {
+      for (const key of BROWSER_GALLERY_LEGACY_KEYS) {
+        localStorage.removeItem(key);
+      }
+    } catch {
+      // ignore storage cleanup failures
+    }
+    if (typeof indexedDB !== "undefined" && typeof indexedDB.deleteDatabase === "function") {
+      for (const dbName of BROWSER_GALLERY_LEGACY_DBS) {
+        try {
+          indexedDB.deleteDatabase(dbName);
+        } catch {
+          // ignore legacy db cleanup failures
+        }
+      }
+    }
+  }
   const existing = await readBrowserGalleryFromDb();
   if (Array.isArray(existing) && existing.length) return;
   const legacy = readBrowserGalleryLegacy();

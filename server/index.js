@@ -26,6 +26,7 @@ const NO_STUDIO_NOISE_GIF_ROOT = path.join(RENDERS_ROOT, "no-studio-noise-gif");
 const NO_PALETTE_WORKER_PATH = path.join(APP_ROOT, "scripts", "nopalette_worker.py");
 const NO_GALLERY_ROOT = path.join(DATA_ROOT, "no-gallery");
 const NO_GALLERY_INDEX_PATH = path.join(NO_GALLERY_ROOT, "gallery.json");
+const NO_GALLERY_SCHEMA_VERSION = 3;
 
 const FEATURED_IDS = [7804, 0, 52, 9999, 214, 604, 1337, 420, 69, 8888];
 const LEGACY_TOOL_ROUTES = new Set(["/tools/no-palette", "/tools/no-generate", "/tools/gif-lab", "/tools/tcg-forge"]);
@@ -549,6 +550,7 @@ function normalizeGalleryEntry(entry, useNoStudioPrefix) {
           mode: sanitizeText(entry.rolePair.mode, 12),
         }
       : null,
+    schemaVersion: Number(entry?.schemaVersion) || 0,
     ...galleryItemUrls(fileName, useNoStudioPrefix),
   };
 }
@@ -617,6 +619,7 @@ function saveNoGalleryEntry({
           mode: sanitizeText(rolePair.mode, 12),
         }
       : null,
+    schemaVersion: NO_GALLERY_SCHEMA_VERSION,
   };
   entries.unshift(nextEntry);
 
@@ -736,6 +739,7 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           writeNoGalleryEntries(entries);
         }
         const items = entries
+          .filter((entry) => Number(entry?.schemaVersion) === NO_GALLERY_SCHEMA_VERSION)
           .slice(0, limit)
           .map((entry) => normalizeGalleryEntry(entry, useNoStudioPrefix));
         return sendJson(res, 200, {

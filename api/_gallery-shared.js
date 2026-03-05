@@ -3,9 +3,10 @@
 const crypto = require("node:crypto");
 const { list, put } = require("@vercel/blob");
 
-const INDEX_KEY = "no-gallery/index.json";
+const INDEX_KEY = "no-gallery/index-v3.json";
 const MEDIA_PREFIX = "no-gallery/media";
 const MAX_GALLERY_ITEMS = 240;
+const NO_GALLERY_SCHEMA_VERSION = 3;
 
 function sanitizeText(value, maxLength = 160) {
   return String(value || "")
@@ -96,6 +97,7 @@ function toPublicEntry(entry) {
     thumbUrl: mediaUrl,
     pngUrl: mediaType === "png" ? mediaUrl : null,
     gifUrl: mediaType === "gif" ? mediaUrl : null,
+    schemaVersion: Number(entry?.schemaVersion) || 0,
   };
 }
 
@@ -149,7 +151,7 @@ async function loadGalleryIndex() {
 async function saveGalleryIndex(entries) {
   const normalized = (Array.isArray(entries) ? entries : [])
     .map((entry) => toPublicEntry(entry))
-    .filter((entry) => entry.id && entry.mediaUrl)
+    .filter((entry) => entry.id && entry.mediaUrl && entry.schemaVersion === NO_GALLERY_SCHEMA_VERSION)
     .slice(0, MAX_GALLERY_ITEMS)
     .map((entry) => ({
       id: entry.id,
@@ -162,6 +164,7 @@ async function saveGalleryIndex(entries) {
       rolePair: entry.rolePair,
       mediaType: entry.mediaType,
       mediaUrl: entry.mediaUrl,
+      schemaVersion: NO_GALLERY_SCHEMA_VERSION,
     }));
 
   await put(INDEX_KEY, JSON.stringify(normalized, null, 2), {
@@ -178,7 +181,11 @@ async function listGalleryEntries(limit = 120) {
   const index = await loadGalleryIndex();
   return index
     .map((entry) => toPublicEntry(entry))
-    .filter((entry) => entry.id && entry.mediaUrl)
+    .filter((entry) => (
+      entry.id
+      && entry.mediaUrl
+      && Number(entry.schemaVersion) === NO_GALLERY_SCHEMA_VERSION
+    ))
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, max);
 }
@@ -214,6 +221,7 @@ async function saveGalleryEntry(payload) {
     rolePair: normalizeRolePair(payload?.rolePair),
     mediaType,
     mediaUrl: mediaBlob.url,
+    schemaVersion: NO_GALLERY_SCHEMA_VERSION,
   };
 
   const index = await loadGalleryIndex();
