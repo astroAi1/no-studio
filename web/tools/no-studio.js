@@ -1731,22 +1731,23 @@ export function mountNoStudioTool(root, shellApi = {}) {
       const acHsl = rgbToHsl(acRgb.r, acRgb.g, acRgb.b);
       const step = 360 / panelCount;
       if (popStyle === POP_SHEET_STYLE_POSTER) {
-        // Even hue steps around the wheel, max-saturation poster paint feel
+        // Even hue steps, poster-paint vivid (Warhol Marilyn brightness)
         const startHue = (acHsl.h + randomInt(12, 36)) % 360;
         return Array.from({ length: panelCount }, (_, i) => {
           const hue = (startHue + i * step) % 360;
           const sat = 0.84 + (Math.random() * 0.13);
-          const lum = 0.34 + (Math.random() * 0.22);
+          const lum = 0.44 + (Math.random() * 0.18);
           const rgb = hslToRgb(hue, sat, lum);
           return rgbToHex(rgb.r, rgb.g, rgb.b);
         });
       }
-      // Screenprint: paper tint — light, nearly achromatic, slightly warm or cool
+      // Screenprint: moderately vivid — enough saturation for printing-ground feel,
+      // slightly darker/more muted than poster so inks read distinctly on top.
       const startHue = (acHsl.h + randomInt(-16, 16) + 360) % 360;
       return Array.from({ length: panelCount }, (_, i) => {
         const hue = (startHue + i * step) % 360;
-        const sat = 0.06 + (Math.random() * 0.20);
-        const lum = 0.82 + (Math.random() * 0.12);
+        const sat = 0.58 + (Math.random() * 0.22);
+        const lum = 0.30 + (Math.random() * 0.20);
         const rgb = hslToRgb(hue, sat, lum);
         return rgbToHex(rgb.r, rgb.g, rgb.b);
       });
@@ -1756,6 +1757,28 @@ export function mountNoStudioTool(root, shellApi = {}) {
       const backgroundHex = state.useActiveBg
         ? selectedActiveHex()
         : (preGenPanelBgs ? preGenPanelBgs[panelIndex % preGenPanelBgs.length] : null);
+
+      if (preGenPanelBgs) {
+        // Pre-generated backgrounds guarantee visual diversity across panels — the
+        // usedSignatures dedup loop is counter-productive here (it exhausts the small
+        // palette space and causes panels to collapse to the same colour).
+        const preset = createUniqueVariant("warhol", classified);
+        const result = buildFamilyResult(classified, "warhol", {
+          preset,
+          backgroundHex,
+          traitPhase: 0,
+          panelIndex,
+          panelCount,
+          popSheetStyle: popStyle,
+        });
+        return {
+          preset,
+          mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+          roles: result.roles,
+        };
+      }
+
+      // Legacy uniqueness-checking path — used only when useActiveBg is active
       let selected = null;
 
       for (let attempt = 0; attempt < 96; attempt += 1) {
@@ -1958,7 +1981,13 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const forbidden = new Set((classified || []).map((entry) => String(entry?.hex || "").toUpperCase()));
     forbidden.add(BRAND_ROLE_BG);
     forbidden.add(BRAND_ROLE_FG);
-    const floor = hexLuma(roles.outline || BRAND_ROLE_FG) + 2;
+    // For screenprint, inks must render dark/rich against the background.
+    // The outline is barely-different-from-bg (bg+4), so the normal luma-floor
+    // would bleach all ink colours toward white — override it to a fixed low value.
+    const outlineLuma = hexLuma(roles.outline || BRAND_ROLE_FG);
+    const floor = (family === "warhol" && popSheetStyle === POP_SHEET_STYLE_SCREENPRINT)
+      ? 2
+      : outlineLuma + 2;
     const gm = state.globalModifiers;
     const fm = state.familyModifiers[family] || {};
     const profile = getFamilyProfile(family);
