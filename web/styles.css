@@ -1456,6 +1456,7 @@ label.no-field-meter:focus-within .no-field-meter-hint {
   font-size: 10px;
   letter-spacing: .08em;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .hero-role-pair {
@@ -1515,6 +1516,8 @@ label.no-field-meter:focus-within .no-field-meter-hint {
 
 .no-field-guidance {
   margin: -4px 0 2px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .no-field-meter {
@@ -1570,6 +1573,24 @@ label.no-field-meter:focus-within .no-field-meter-hint {
 
 .noise-target-rail {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pop-sheet-style-rail {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pop-sheet-rail {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pop-sheet-style-rail .theory-btn {
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 11px;
+  letter-spacing: .04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .theory-btn {

@@ -3,15 +3,34 @@ function writeWord(bytes, value) {
 }
 
 function buildRgb332Palette() {
+  // Upgraded from classic RGB332 to a perceptually smoother 6x7x6 cube
+  // (252 colors) while still fitting a 256-color GIF global table.
   const palette = new Uint8Array(256 * 3);
-  for (let i = 0; i < 256; i += 1) {
-    const r = ((i >> 5) & 0x07) * 255 / 7;
-    const g = ((i >> 2) & 0x07) * 255 / 7;
-    const b = (i & 0x03) * 255 / 3;
+  const rLevels = 6;
+  const gLevels = 7;
+  const bLevels = 6;
+  const total = rLevels * gLevels * bLevels; // 252
+  let i = 0;
+  for (let r = 0; r < rLevels; r += 1) {
+    for (let g = 0; g < gLevels; g += 1) {
+      for (let b = 0; b < bLevels; b += 1) {
+        const base = i * 3;
+        palette[base] = Math.round((r * 255) / (rLevels - 1));
+        palette[base + 1] = Math.round((g * 255) / (gLevels - 1));
+        palette[base + 2] = Math.round((b * 255) / (bLevels - 1));
+        i += 1;
+      }
+    }
+  }
+  // Pad the remaining slots with the last valid color.
+  const padR = palette[(total - 1) * 3];
+  const padG = palette[(total - 1) * 3 + 1];
+  const padB = palette[(total - 1) * 3 + 2];
+  for (; i < 256; i += 1) {
     const base = i * 3;
-    palette[base] = Math.round(r);
-    palette[base + 1] = Math.round(g);
-    palette[base + 2] = Math.round(b);
+    palette[base] = padR;
+    palette[base + 1] = padG;
+    palette[base + 2] = padB;
   }
   return palette;
 }
@@ -19,8 +38,14 @@ function buildRgb332Palette() {
 export function quantizeImageDataToRgb332(imageData) {
   const src = imageData.data || imageData;
   const out = new Uint8Array(Math.floor(src.length / 4));
+  const rLevels = 6;
+  const gLevels = 7;
+  const bLevels = 6;
   for (let i = 0, j = 0; i < src.length; i += 4, j += 1) {
-    out[j] = ((src[i] & 0xe0) | ((src[i + 1] & 0xe0) >> 3) | ((src[i + 2] & 0xc0) >> 6));
+    const r = Math.max(0, Math.min(rLevels - 1, Math.round((src[i] * (rLevels - 1)) / 255)));
+    const g = Math.max(0, Math.min(gLevels - 1, Math.round((src[i + 1] * (gLevels - 1)) / 255)));
+    const b = Math.max(0, Math.min(bLevels - 1, Math.round((src[i + 2] * (bLevels - 1)) / 255)));
+    out[j] = (r * (gLevels * bLevels)) + (g * bLevels) + b;
   }
   return out;
 }

@@ -164,7 +164,7 @@ export function createStudioTemplate() {
           <div class="preset-tabs">
             <button class="preset-tab is-active" data-preset-tab="mono" title="Single-hue tonal range. Clean and restrained.">Mono</button>
             <button class="preset-tab" data-preset-tab="noir" title="Dark-first palette. Deep shadows, minimal highlights.">Noir</button>
-            <button class="preset-tab" data-preset-tab="warhol" title="Bold graphic colour. Warhol-style pop palette.">Pop</button>
+            <button class="preset-tab" data-preset-tab="warhol" title="Bold graphic colour. Warhol-pop palette.">Pop</button>
             <button class="preset-tab" data-preset-tab="acid" title="High-contrast synthetic hues. Uncomfortable and sharp.">Acid</button>
             <button class="preset-tab" data-preset-tab="pastel" title="Soft powder tones. Gentle, light, low contrast.">Pastel</button>
           </div>

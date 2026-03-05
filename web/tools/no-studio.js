@@ -262,6 +262,25 @@ const FAMILY_PROFILES = {
   },
 };
 
+const NOIR_COLOR_SCHEMES = [
+  {
+    id: "classic-noir",
+    anchors: ["#0E0E0E", "#1A1A1A", "#2E2E2E", "#5B5B5B", "#D8D3C9"],
+  },
+  {
+    id: "blood-noir",
+    anchors: ["#0D0C0E", "#181618", "#2B171C", "#4A3036", "#DED1C7"],
+  },
+  {
+    id: "cold-noir",
+    anchors: ["#0C0E12", "#141923", "#273449", "#505C6E", "#D2D7DE"],
+  },
+  {
+    id: "bruise-noir",
+    anchors: ["#0E0B12", "#171420", "#2D2238", "#57505D", "#E0D8CF"],
+  },
+];
+
 function createDefaultGlobalModifiers() {
   return {
     toneCount: 5,
@@ -378,7 +397,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noiseAmount: 28,
     noisePass: 0,
     lastReductionMode: "none",
-    rerollMode: "world",
     globalModifiers: createDefaultGlobalModifiers(),
     familyModifiers: createDefaultFamilyModifiers(),
     variantByFamily: {
@@ -409,8 +427,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noMinimalPreviewPair: null,
     noFieldLastFamily: "noir",
     popSheetLayout: "2x2",
+    popSheetStyle: "warhol",
     isSheetMode: false,
-    traitRecastNonce: 0,
   };
 
   // ── Session persistence ──────────────────────────────────────
@@ -429,6 +447,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
         globalModifiers: state.globalModifiers,
         familyModifiers: state.familyModifiers,
         popSheetLayout: state.popSheetLayout,
+        popSheetStyle: state.popSheetStyle,
         gallerySignature: normalizeSignatureHandle(els.gallerySignature?.value || state.gallerySignature || ""),
         curatedPaletteMap: state.curatedPaletteMap,
         curationSourceHex: state.curationSourceHex,
@@ -611,6 +630,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
       Math.round(Number((preset.depthLayers ?? 0) * 100)),
       Math.round(Number((preset.chiaroscuro ?? 0) * 1000)),
       Math.round(Number((preset.voidBias ?? 0) * 1000)),
+      String(preset.noirScheme || ""),
+      Math.round(Number((preset.noirPhase ?? 0) * 1000)),
       String(preset.harmony || ""),
       state.globalModifiers.toneCount,
       state.globalModifiers.contrast,
@@ -625,11 +646,18 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const excludeActiveHex = family !== "warhol";
     let fallback = null;
     for (let i = 0; i < 96; i += 1) {
-      const preset = createRandomPreset(family, {
+      const basePreset = createRandomPreset(family, {
         activeHex: userAnchorHex,
         sourcePalette,
         excludeActiveHex,
       });
+      const preset = family === "noir"
+        ? {
+            ...basePreset,
+            noirScheme: pickOne(NOIR_COLOR_SCHEMES)?.id || "classic-noir",
+            noirPhase: Math.random(),
+          }
+        : basePreset;
       if (!fallback) fallback = preset;
       const signature = makeVariantSessionSignature(family, preset);
       if (!state.sessionSignatures.has(signature)) {
@@ -995,13 +1023,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const family = activeCreativeFamily();
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
     const variant = state.variantByFamily[family] || createUniqueVariant(family, classified);
-    const backgroundHex = resolveBackgroundForReroll("world", family);
+    const backgroundHex = resolveBackgroundForCast(family, { refreshWorld: true });
     const result = buildFamilyResult(classified, family, {
       preset: variant,
       backgroundHex,
-      traitPhase: state.traitRecastNonce,
+      traitPhase: 0,
       panelIndex: 0,
       panelCount: 1,
+      popSheetStyle: state.popSheetStyle,
     });
     const nextMapping = { ...(result.mapping || {}) };
     const floor = hexLuma(result.roles?.outline || "#040404");
@@ -1462,7 +1491,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function renderGallery() {
     if (!els.galleryList) return;
     if (!state.noGalleryAvailable) {
-      els.galleryList.innerHTML = `<div class="gallery-empty">No-Gallery is only available on the local No-Studio server.</div>`;
+      els.galleryList.innerHTML = `<div class="gallery-empty">No-Gallery is unavailable for this deployment.</div>`;
       if (els.galleryRefresh) els.galleryRefresh.disabled = true;
       return;
     }
@@ -1560,37 +1589,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!grain.enabled || !(grain.amount > 0)) {
       throw new Error("Enable grain first to save GIF to No-Gallery");
     }
-    if (state.noiseGifAvailable) {
-      try {
-        const imageData = canvas.exportImageData();
-        const rgba24B64 = encodeRgba24B64(imageData.data);
-        const occupiedPixels = Array.from(state.originalOccupied || canvas.getOccupied());
-        const payload = await renderNoStudioNoiseGif({
-          tokenId: state.selected.id,
-          rgba24B64,
-          occupiedPixels,
-          grain,
-        });
-        const response = await fetch(payload.output.gifUrl, { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error(`GIF fetch failed (${response.status})`);
-        }
-        const blob = await response.blob();
-        return await blobToDataUrl(blob);
-      } catch (error) {
-        if (!/local No-Studio server/i.test(String(error.message || ""))) {
-          throw error;
-        }
-      }
-    }
-    const browserGif = await exportNoiseGifInBrowser();
+    setTopbarStatus("Rendering gallery GIF (optimized)...");
+    const browserGif = await exportNoiseGifInBrowser({
+      size: 512,
+      frames: 10,
+      durationMs: 1000,
+    });
     return await blobToDataUrl(browserGif.blob);
   }
 
   async function saveCurrentToGallery({ mediaKind = "png" } = {}) {
     if (!state.selected || state.gallerySaving) return;
     if (!state.noGalleryAvailable) {
-      setTopbarStatus("No-Gallery is local-server only");
+      setTopbarStatus("No-Gallery is unavailable for this deployment");
       return;
     }
     if (mediaKind !== "png" && mediaKind !== "gif") {
@@ -1666,32 +1677,78 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return specs[layoutId] || specs["2x2"];
   }
 
-  function applyPopSheet(layoutId = state.popSheetLayout) {
+  function makePanelPaletteSignature(result) {
+    const unique = new Set();
+    const bg = String(result?.roles?.background || "").toUpperCase();
+    const ol = String(result?.roles?.outline || "").toUpperCase();
+    if (/^#[0-9A-F]{6}$/.test(bg)) unique.add(bg);
+    if (/^#[0-9A-F]{6}$/.test(ol)) unique.add(ol);
+    for (const value of Object.values(result?.mapping || {})) {
+      const hex = String(value || "").toUpperCase();
+      if (/^#[0-9A-F]{6}$/.test(hex)) unique.add(hex);
+    }
+    return [...unique].sort().join("|");
+  }
+
+  function applyPopSheet(layoutId = state.popSheetLayout, styleId = state.popSheetStyle) {
     if (!state.selected || !state.originalImageData) return;
 
     const { cols, rows, label } = getPopSheetSpec(layoutId);
     const source = state.originalImageData;
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
+    const roleByHex = state.sourceRoleByHex instanceof Map ? state.sourceRoleByHex : new Map();
     const panelCount = cols * rows;
+    const popStyle = styleId === "screenprint" ? "screenprint" : "warhol";
+    const usedSignatures = new Set();
 
     const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => {
-      const preset = createUniqueVariant("warhol", classified);
       const backgroundHex = state.useActiveBg ? selectedActiveHex() : null;
-      const result = buildFamilyResult(classified, "warhol", {
-        preset,
+      let selected = null;
+
+      for (let attempt = 0; attempt < 96; attempt += 1) {
+        const preset = createUniqueVariant("warhol", classified);
+        const result = buildFamilyResult(classified, "warhol", {
+          preset,
+          backgroundHex,
+          traitPhase: 0,
+          panelIndex: panelIndex + (attempt * panelCount),
+          panelCount: panelCount * 2,
+          popSheetStyle: popStyle,
+        });
+        const signature = makePanelPaletteSignature(result);
+        if (!signature || usedSignatures.has(signature)) {
+          continue;
+        }
+        usedSignatures.add(signature);
+        selected = {
+          preset,
+          mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+          roles: result.roles,
+        };
+        break;
+      }
+
+      if (selected) {
+        return selected;
+      }
+
+      const fallbackPreset = createUniqueVariant("warhol", classified);
+      const fallback = buildFamilyResult(classified, "warhol", {
+        preset: fallbackPreset,
         backgroundHex,
-        traitPhase: state.traitRecastNonce,
+        traitPhase: 0,
         panelIndex,
         panelCount,
+        popSheetStyle: popStyle,
       });
       return {
-        preset,
-        mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
-        roles: result.roles,
+        preset: fallbackPreset,
+        mapping: new Map(Object.entries(fallback.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+        roles: fallback.roles,
       };
     });
 
-    const tiles = panelResults.map((panel) => {
+    const tiles = panelResults.map((panel, panelIndex) => {
       const tile = new Uint8ClampedArray(source.data.length);
       for (let y = 0; y < source.height; y += 1) {
         for (let x = 0; x < source.width; x += 1) {
@@ -1700,12 +1757,38 @@ export function mountNoStudioTool(root, shellApi = {}) {
           let targetHex = panel.roles?.background || "#000000";
           if (alpha > 0) {
             const origHex = rgbToHex(source.data[idx], source.data[idx + 1], source.data[idx + 2]).toUpperCase();
+            const role = roleByHex.get(origHex) || "body";
             if (origHex === "#040404") {
               targetHex = panel.roles?.outline || targetHex;
             } else if (origHex === "#000000") {
               targetHex = panel.roles?.background || targetHex;
             } else {
               targetHex = panel.mapping.get(origHex) || origHex;
+            }
+
+            if (popStyle === "screenprint" && role !== "background" && role !== "outline") {
+              const shiftX = panelIndex % 2 === 0 ? 1 : -1;
+              const shiftY = (panelIndex + 1) % 3 === 0 ? 1 : 0;
+              const shouldMisregister = ((x * 3) + (y * 5) + panelIndex) % 11 < 3;
+              if (shouldMisregister) {
+                const sx = Math.max(0, Math.min(source.width - 1, x + shiftX));
+                const sy = Math.max(0, Math.min(source.height - 1, y + shiftY));
+                const sIdx = (sy * source.width + sx) * 4;
+                if (source.data[sIdx + 3] > 0) {
+                  const shiftedHex = rgbToHex(source.data[sIdx], source.data[sIdx + 1], source.data[sIdx + 2]).toUpperCase();
+                  const shiftedRole = roleByHex.get(shiftedHex) || "body";
+                  if (shiftedRole !== "background" && shiftedRole !== "outline") {
+                    targetHex = panel.mapping.get(shiftedHex) || targetHex;
+                  }
+                }
+              }
+
+              const halftoneDot = ((x + (y * 2) + panelIndex) % 4) === 0 || (((x * 5) + (y * 3) + panelIndex) % 13) === 0;
+              if (halftoneDot) {
+                targetHex = mixHex(targetHex, panel.roles?.background || "#000000", 0.24);
+              } else if (((x + y + panelIndex) % 7) === 0) {
+                targetHex = mixHex(targetHex, "#FFFFFF", 0.08);
+              }
             }
           }
           const rgb = hexToRgb(targetHex);
@@ -1724,7 +1807,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.lastReductionMode = "pop-sheet";
     canvas.setSheetTiles(tiles, cols, rows);
     renderVariantPanel();
-    setTopbarStatus(`Pop Sheet · ${label} serial print · full 24×24 tile per panel`);
+    const styleLabel = popStyle === "screenprint" ? "screenprint" : "warhol";
+    setTopbarStatus(`Pop Sheet · ${label} ${styleLabel} · full 24×24 tile per panel`);
     pulseStudio("surprise");
   }
 
@@ -1745,7 +1829,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return toneCount;
   }
 
-  function createFamilyHueBank(family, bgHue, fm, panelIndex, panelCount, driftNorm) {
+  function createFamilyHueBank(family, bgHue, fm, panelIndex, panelCount, driftNorm, popSheetStyle = "warhol") {
     if (family === "mono") {
       const drift = Number(fm.hueDrift) || 0;
       const spread = Math.max(4, drift * 0.9);
@@ -1756,6 +1840,16 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
     if (family === "warhol") {
       const divergence = clampUnit((Number(fm.panelDivergence) || 0) / 100);
+      if (popSheetStyle === "screenprint") {
+        const panelShift = panelCount > 1
+          ? (((panelIndex / Math.max(1, panelCount - 1)) - 0.5) * 56 * divergence)
+          : 0;
+        return [
+          bgHue + 22 + panelShift,
+          bgHue + 164 + panelShift,
+          bgHue + 304 + panelShift,
+        ];
+      }
       const panelShift = panelCount > 1
         ? (((panelIndex / Math.max(1, panelCount - 1)) - 0.5) * 140 * divergence)
         : 0;
@@ -1785,7 +1879,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     result,
     classified,
     family,
-    { preset = null, traitPhase = 0, panelIndex = 0, panelCount = 1 } = {},
+    { preset = null, traitPhase = 0, panelIndex = 0, panelCount = 1, popSheetStyle = "warhol" } = {},
   ) {
     const mapping = { ...(result?.mapping || {}) };
     const roles = result?.roles || {};
@@ -1810,7 +1904,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
     const bgRgb = hexToRgb(roles.background || "#000000");
     const bgHsl = rgbToHsl(bgRgb.r, bgRgb.g, bgRgb.b);
-    const hueBank = createFamilyHueBank(family, bgHsl.h, fm, panelIndex, panelCount, driftNorm)
+    const hueBank = createFamilyHueBank(family, bgHsl.h, fm, panelIndex, panelCount, driftNorm, popSheetStyle)
       .map((value) => ((value % 360) + 360) % 360);
     const targetTones = familyToneTarget(family);
     const toneLevels = Math.max(profile.quantMin, Math.min(profile.quantMax, targetTones));
@@ -1846,24 +1940,61 @@ export function mountNoStudioTool(root, shellApi = {}) {
         const voidBias = clampUnit(Number(preset?.voidBias) || 0.42);
         const spectralTilt = Number(preset?.spectralTilt) || 0;
         const darkLift = Math.max(0.16, 0.34 - (shadowDepth * 0.14));
-        hue = (bgHsl.h + (spectralTilt * (layerT - 0.5)) + (pulse * (2.2 + (driftNorm * 2.2))) + 360) % 360;
+        const schemeId = String(preset?.noirScheme || "classic-noir");
+        const scheme = NOIR_COLOR_SCHEMES.find((entry) => entry.id === schemeId) || NOIR_COLOR_SCHEMES[0];
+        const anchors = Array.isArray(scheme.anchors) && scheme.anchors.length
+          ? scheme.anchors
+          : NOIR_COLOR_SCHEMES[0].anchors;
+        const rampSpan = Math.max(1, anchors.length - 2);
+        const rampIdx = Math.min(rampSpan, Math.max(0, Math.round(rank * rampSpan)));
+        const anchorHex = role === "accent"
+          ? anchors[anchors.length - 1]
+          : anchors[rampIdx];
+        const anchorRgb = hexToRgb(anchorHex);
+        const anchorHsl = rgbToHsl(anchorRgb.r, anchorRgb.g, anchorRgb.b);
+        const noirPhase = Number(preset?.noirPhase || 0);
+        hue = (
+          anchorHsl.h
+          + (spectralTilt * (layerT - 0.5) * 0.35)
+          + (pulse * (1.6 + (driftNorm * 1.8)))
+          + ((noirPhase - 0.5) * 12)
+          + 360
+        ) % 360;
         sat = clampUnit(
-          0.01
-          + (layerT * 0.08)
-          + (Math.abs(layerPulse) * 0.02)
-          + (role === "accent" ? ((1 - accentGate) * 0.08) : 0),
+          (anchorHsl.s * (0.64 + ((1 - accentGate) * 0.08)))
+          + 0.012
+          + (layerT * 0.05)
+          + (Math.abs(layerPulse) * 0.016)
+          + (role === "accent" ? ((1 - accentGate) * 0.075) : 0),
         );
         light = clampUnit(
-          (0.05 + (voidBias * 0.03))
-          + ((rank * darkLift) * (0.68 + (chiaroscuro * 0.22)))
-          + (layerPulse * (0.02 + (chiaroscuro * 0.035)))
-          + (role === "accent" ? ((1 - accentGate) * 0.095) : 0),
+          (anchorHsl.l * (0.66 + ((1 - shadowDepth) * 0.16)))
+          + (rank * darkLift * (0.52 + (chiaroscuro * 0.28)))
+          + (layerPulse * (0.012 + (chiaroscuro * 0.026)))
+          + (role === "accent" ? ((1 - accentGate) * 0.082) : 0)
+          + (voidBias * 0.012),
         );
+        if (role !== "accent") {
+          light = Math.min(0.56, light);
+        }
         levels = Math.max(3, Math.min(5, levels));
       } else if (family === "warhol") {
         const flatness = clampUnit((Number(fm.flatness) || 0) / 100);
-        sat = clampUnit(0.72 + ((1 - flatness) * 0.24) + (role === "accent" ? 0.06 : 0));
-        levels = Math.max(3, Math.round(lerp(6, 3, flatness)));
+        if (popSheetStyle === "screenprint") {
+          sat = clampUnit(0.46 + ((1 - flatness) * 0.24) + (role === "accent" ? 0.08 : 0));
+          levels = 4;
+          light = clampUnit(0.2 + (rank * 0.56) + (role === "accent" ? 0.05 : 0));
+        } else {
+          const posterBand = Math.round(clampUnit(rank) * 2) / 2;
+          sat = clampUnit(0.84 + ((1 - flatness) * 0.14) + (role === "accent" ? 0.08 : 0));
+          levels = 3;
+          light = clampUnit(
+            0.18
+            + (posterBand * 0.62)
+            + (role === "accent" ? 0.08 : 0)
+            + (Math.sin((panelIndex * 0.8) + idx) * 0.03),
+          );
+        }
       } else if (family === "acid") {
         const corrosion = clampUnit((Number(fm.corrosion) || 0) / 100);
         sat = clampUnit(0.82 + (corrosion * 0.16));
@@ -1904,6 +2035,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     traitPhase = 0,
     panelIndex = 0,
     panelCount = 1,
+    popSheetStyle = "warhol",
   } = {}) {
     const toneTarget = familyToneTarget(family);
     const effectivePreset = preset || createUniqueVariant(family, classified);
@@ -1919,6 +2051,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       traitPhase,
       panelIndex,
       panelCount,
+      popSheetStyle,
     });
     return {
       preset: effectivePreset,
@@ -1928,22 +2061,19 @@ export function mountNoStudioTool(root, shellApi = {}) {
     };
   }
 
-  function resolveBackgroundForReroll(rerollMode, family) {
+  function resolveBackgroundForCast(family, { refreshWorld = true } = {}) {
     if (state.useActiveBg) {
       return deriveNoMinimalismPair(selectedActiveHex(), state.noMinimalDeltaMode).background;
     }
-    if (rerollMode === "palette" || rerollMode === "traits") {
+    if (!refreshWorld) {
       return ensureNoMinimalPreviewPair().background;
     }
-    if (rerollMode === "world") {
-      const worldBg = familyWorldBackgroundHex(family);
-      state.noMinimalPreviewPair = deriveNoMinimalismPair(worldBg, state.noMinimalDeltaMode);
-      return state.noMinimalPreviewPair.background;
-    }
-    return ensureNoMinimalPreviewPair().background;
+    const worldBg = familyWorldBackgroundHex(family);
+    state.noMinimalPreviewPair = deriveNoMinimalismPair(worldBg, state.noMinimalDeltaMode);
+    return state.noMinimalPreviewPair.background;
   }
 
-  function runNoFieldPass({ family = activeCreativeFamily(), rerollMode = "world", statusPrefix = "Cast" } = {}) {
+  function runNoFieldPass({ family = activeCreativeFamily(), statusPrefix = "Cast" } = {}) {
     if (!state.selected) {
       setServerStatus("Select a NoPunk first.");
       return null;
@@ -1952,20 +2082,16 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.isSheetMode = false;
     canvas.setSubdivision(1);
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const currentVariant = state.variantByFamily[family];
-    const shouldReusePreset = rerollMode === "traits" && currentVariant;
-    const preset = shouldReusePreset ? currentVariant : createUniqueVariant(family, classified);
-    const backgroundHex = resolveBackgroundForReroll(rerollMode, family);
-    if (rerollMode === "traits") {
-      state.traitRecastNonce += 1;
-    }
+    const preset = createUniqueVariant(family, classified);
+    const backgroundHex = resolveBackgroundForCast(family, { refreshWorld: true });
 
     const result = buildFamilyResult(classified, family, {
       preset,
       backgroundHex,
-      traitPhase: state.traitRecastNonce,
+      traitPhase: 0,
       panelIndex: 0,
       panelCount: 1,
+      popSheetStyle: state.popSheetStyle,
     });
 
     state.variantByFamily[family] = result.preset;
@@ -1977,18 +2103,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
     renderVariantPanel();
 
     const familyLabel = FAMILY_LABELS[family] || "Studio";
-    const rerollLabel = rerollMode === "palette"
-      ? "palette reroll"
-      : rerollMode === "traits"
-        ? "trait reroll"
-        : "world reroll";
-    setTopbarStatus(`${statusPrefix} · ${familyLabel} · ${result.toneTarget} tones · ${rerollLabel}`);
-    pulseStudio(rerollMode === "traits" ? "trait" : "variant");
+    setTopbarStatus(`${statusPrefix} · ${familyLabel} · ${result.toneTarget} tones · original-source rerender`);
+    pulseStudio("variant");
     return result;
-  }
-
-  function applyNoField({ rerollMode = "world" } = {}) {
-    runNoFieldPass({ family: activeCreativeFamily(), rerollMode, statusPrefix: "Cast" });
   }
 
   function applyNoMinimalism() {
@@ -2032,13 +2149,18 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const familyHint = {
       mono: "Tonal reduction and hue unity. Keep form while compressing colour variance.",
       noir: "Dark-floor casting with controlled accent reveals. Concealment first.",
-      warhol: "Flat-impact serial colour logic built for single casts and panel sheets.",
+      warhol: "Poster-pop casting with bold contrast for single renders and sheet builds.",
       acid: "Synthetic clash space with unstable complements and sharper tensions.",
       pastel: "Airy high-light render with powder softness and quiet separations.",
     }[activeTab] || "Every cast starts from the original source punk.";
 
     const popSheetControls = activeTab === "warhol"
       ? `
+        <div class="variant-title">Pop Sheet Style</div>
+        <div class="theory-rail pop-sheet-style-rail">
+          <button class="theory-btn${state.popSheetStyle === "warhol" ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="warhol">Warhol</button>
+          <button class="theory-btn${state.popSheetStyle === "screenprint" ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="screenprint">Screenprint</button>
+        </div>
         <div class="variant-title">Pop Sheet</div>
         <div class="theory-rail pop-sheet-rail">
           <button class="theory-btn${state.popSheetLayout === "2x2" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="2x2">2x2</button>
@@ -2057,9 +2179,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
         <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift · ${toneTarget} tones</div>
         <div class="variant-action-grid">
           <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab}">Cast ${escapeHtml(familyLabel)}</button>
-          <button class="preset-btn" type="button" data-action="reroll-palette">Re-roll Palette</button>
-          <button class="preset-btn" type="button" data-action="reroll-world">Re-roll World</button>
-          <button class="preset-btn" type="button" data-action="reroll-traits">Re-roll Traits</button>
         </div>
         ${popSheetControls}
         <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
@@ -2080,29 +2199,25 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!btn) return;
     if (btn.dataset.action === "render-core") {
       const family = btn.dataset.family || activeCreativeFamily();
-      runNoFieldPass({ family, rerollMode: "world", statusPrefix: `Render ${FAMILY_LABELS[family] || "Studio"}` });
-      return;
-    }
-    if (btn.dataset.action === "reroll-palette") {
-      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "palette", statusPrefix: "Re-roll Palette" });
-      return;
-    }
-    if (btn.dataset.action === "reroll-world") {
-      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "world", statusPrefix: "Re-roll World" });
-      return;
-    }
-    if (btn.dataset.action === "reroll-traits") {
-      runNoFieldPass({ family: activeCreativeFamily(), rerollMode: "traits", statusPrefix: "Re-roll Traits" });
+      runNoFieldPass({ family, statusPrefix: `Render ${FAMILY_LABELS[family] || "Studio"}` });
       return;
     }
     if (btn.dataset.action === "build-pop-sheet") {
-      applyPopSheet(state.popSheetLayout);
+      applyPopSheet(state.popSheetLayout, state.popSheetStyle);
       return;
     }
     if (btn.dataset.action === "set-pop-sheet") {
       state.popSheetLayout = btn.dataset.layout || "2x2";
       renderVariantPanel();
       setTopbarStatus(`Pop Sheet ${state.popSheetLayout} armed`);
+      return;
+    }
+    if (btn.dataset.action === "set-pop-sheet-style") {
+      const nextStyle = btn.dataset.style === "screenprint" ? "screenprint" : "warhol";
+      state.popSheetStyle = nextStyle;
+      renderVariantPanel();
+      const styleLabel = nextStyle === "screenprint" ? "Screenprint" : "Warhol";
+      setTopbarStatus(`Pop Sheet style · ${styleLabel}`);
     }
   });
 
@@ -2143,7 +2258,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     for (let attempt = 0; attempt < 9; attempt += 1) {
       chosenFamily = pickOne(families) || chosenFamily;
       setActivePresetTab(chosenFamily);
-      runNoFieldPass({ family: chosenFamily, rerollMode: "world", statusPrefix: "Cast" });
+      runNoFieldPass({ family: chosenFamily, statusPrefix: "Cast" });
       const signature = makeCanvasOutputSignature();
       if (rememberOutputSignature(signature)) {
         accepted = true;
@@ -2192,29 +2307,43 @@ export function mountNoStudioTool(root, shellApi = {}) {
     link.remove();
   }
 
-  async function exportNoiseGifInBrowser() {
+  async function exportNoiseGifInBrowser({
+    size = 1024,
+    frames: frameCount = 12,
+    durationMs = 1000,
+  } = {}) {
     const grain = canvas.getDisplayGrain();
     const frames = [];
     const baseSeed = Math.max(0, Number(grain.seed) || 0);
-    const totalFrames = 12;
+    const totalFrames = Math.max(4, Math.min(24, Math.round(Number(frameCount) || 12)));
+    const renderSize = Math.max(256, Math.min(1024, Math.round(Number(size) || 1024)));
     for (let i = 0; i < totalFrames; i += 1) {
-      const frameCanvas = canvas.exportPng1024({
+      const sourceCanvas = canvas.exportPng1024({
         grain: {
           ...grain,
           enabled: true,
           seed: baseSeed + i,
         },
       });
+      let frameCanvas = sourceCanvas;
+      if (renderSize !== 1024) {
+        frameCanvas = document.createElement("canvas");
+        frameCanvas.width = renderSize;
+        frameCanvas.height = renderSize;
+        const frameScaleCtx = frameCanvas.getContext("2d");
+        frameScaleCtx.imageSmoothingEnabled = false;
+        frameScaleCtx.drawImage(sourceCanvas, 0, 0, renderSize, renderSize);
+      }
       const frameCtx = frameCanvas.getContext("2d", { willReadFrequently: true });
-      const frameImage = frameCtx.getImageData(0, 0, 1024, 1024);
+      const frameImage = frameCtx.getImageData(0, 0, renderSize, renderSize);
       frames.push(quantizeImageDataToRgb332(frameImage));
       await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     const gifBytes = encodeIndexedGif({
-      width: 1024,
-      height: 1024,
+      width: renderSize,
+      height: renderSize,
       frames,
-      delayMs: Math.round(1000 / totalFrames),
+      delayMs: Math.max(20, Math.round((Number(durationMs) || 1000) / totalFrames)),
       loop: 0,
     });
     return {
@@ -2265,7 +2394,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
         }
       }
 
-      const browserGif = await exportNoiseGifInBrowser();
+      const browserGif = await exportNoiseGifInBrowser({
+        size: 1024,
+        frames: 12,
+        durationMs: 1000,
+      });
       downloadBlob(browserGif.blob, fileName);
       setTopbarStatus(`Animated grain GIF · ${browserGif.frames} frames · 1s`);
     } catch (error) {
@@ -2415,6 +2548,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.activeNoiseTarget = state.globalModifiers.grainTarget || state.activeNoiseTarget;
     state.noiseAmount = Number(state.globalModifiers.grainAmount ?? state.noiseAmount) || state.noiseAmount;
     if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
+    if (savedSession.popSheetStyle === "warhol" || savedSession.popSheetStyle === "screenprint") {
+      state.popSheetStyle = savedSession.popSheetStyle;
+    } else if (savedSession.popSheetStyle === "serial") {
+      state.popSheetStyle = "warhol";
+    }
     if (savedSession.gallerySignature) {
       state.gallerySignature = normalizeSignatureHandle(savedSession.gallerySignature);
     }
