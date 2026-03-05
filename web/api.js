@@ -18,6 +18,13 @@ let staticTraitDbPromise = null;
 let staticPunkIndexPromise = null;
 const BROWSER_GALLERY_KEY = "no-studio-browser-gallery-v1";
 const BROWSER_GALLERY_LIMIT = 60;
+const BROWSER_GALLERY_DB_NAME = "no-studio-gallery-v1";
+const BROWSER_GALLERY_DB_VERSION = 1;
+const BROWSER_GALLERY_STORE = "entries";
+const GALLERY_REQUEST_TIMEOUT_MS = 4500;
+let browserGalleryDbPromise = null;
+let browserGalleryMigrationDone = false;
+let sharedGalleryUnavailable = false;
 
 export async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
@@ -54,6 +61,30 @@ export async function fetchJson(url, options = {}) {
   return payload;
 }
 
+export async function fetchJsonWithTimeout(url, options = {}, timeoutMs = GALLERY_REQUEST_TIMEOUT_MS) {
+  if (typeof AbortController === "undefined") {
+    return fetchJson(url, options);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(250, Number(timeoutMs) || GALLERY_REQUEST_TIMEOUT_MS));
+  try {
+    return await fetchJson(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      const timeoutError = new Error(`Request timed out (${Math.max(250, Number(timeoutMs) || GALLERY_REQUEST_TIMEOUT_MS)}ms)`);
+      timeoutError.code = "REQUEST_TIMEOUT";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function isUnavailableApiError(error) {
   if (!error) return false;
   if (error.status === 404 || error.status === 405 || error.status === 501) return true;
@@ -63,6 +94,23 @@ function isUnavailableApiError(error) {
     message.includes("Failed to fetch") ||
     message.includes("NetworkError")
   );
+}
+
+function isSharedGalleryConfigError(error) {
+  if (!error) return false;
+  if (error.status === 503) {
+    const message = String(error.message || "");
+    if (message.includes("Shared No-Gallery is not configured")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isTimeoutApiError(error) {
+  if (!error) return false;
+  if (error.code === "REQUEST_TIMEOUT") return true;
+  return String(error.message || "").includes("Request timed out");
 }
 
 function sanitizeSignatureHandle(value) {
@@ -133,7 +181,7 @@ function normalizeBrowserGalleryItem(entry) {
   };
 }
 
-function readBrowserGallery() {
+function readBrowserGalleryLegacy() {
   try {
     const raw = localStorage.getItem(BROWSER_GALLERY_KEY);
     if (!raw) return [];
@@ -145,7 +193,7 @@ function readBrowserGallery() {
   }
 }
 
-function writeBrowserGallery(entries) {
+function writeBrowserGalleryLegacy(entries) {
   const normalized = (Array.isArray(entries) ? entries : [])
     .map((entry) => normalizeBrowserGalleryItem(entry))
     .filter((entry) => entry.id && entry.mediaUrl)
@@ -167,9 +215,112 @@ function writeBrowserGallery(entries) {
   throw new Error("Gallery storage is full in this browser");
 }
 
+function hasBrowserIndexedDb() {
+  return typeof indexedDB !== "undefined";
+}
+
+function openBrowserGalleryDb() {
+  if (!hasBrowserIndexedDb()) return Promise.resolve(null);
+  if (browserGalleryDbPromise) return browserGalleryDbPromise;
+  browserGalleryDbPromise = new Promise((resolve) => {
+    try {
+      const request = indexedDB.open(BROWSER_GALLERY_DB_NAME, BROWSER_GALLERY_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(BROWSER_GALLERY_STORE)) {
+          db.createObjectStore(BROWSER_GALLERY_STORE, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+      request.onblocked = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return browserGalleryDbPromise;
+}
+
+async function readBrowserGalleryFromDb() {
+  const db = await openBrowserGalleryDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(BROWSER_GALLERY_STORE, "readonly");
+      const store = tx.objectStore(BROWSER_GALLERY_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const out = Array.isArray(req.result)
+          ? req.result.map((entry) => normalizeBrowserGalleryItem(entry)).filter((entry) => entry.id && entry.mediaUrl)
+          : [];
+        out.sort((a, b) => {
+          const aTs = Date.parse(a.createdAt || "");
+          const bTs = Date.parse(b.createdAt || "");
+          return (Number.isFinite(bTs) ? bTs : 0) - (Number.isFinite(aTs) ? aTs : 0);
+        });
+        resolve(out);
+      };
+      req.onerror = () => resolve([]);
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+async function writeBrowserGalleryToDb(entries) {
+  const db = await openBrowserGalleryDb();
+  if (!db) return false;
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .map((entry) => normalizeBrowserGalleryItem(entry))
+    .filter((entry) => entry.id && entry.mediaUrl)
+    .slice(0, BROWSER_GALLERY_LIMIT);
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(BROWSER_GALLERY_STORE, "readwrite");
+      const store = tx.objectStore(BROWSER_GALLERY_STORE);
+      store.clear();
+      for (const entry of normalized) {
+        store.put(entry);
+      }
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function migrateLegacyBrowserGalleryToDb() {
+  if (browserGalleryMigrationDone) return;
+  browserGalleryMigrationDone = true;
+  const existing = await readBrowserGalleryFromDb();
+  if (Array.isArray(existing) && existing.length) return;
+  const legacy = readBrowserGalleryLegacy();
+  if (!legacy.length) return;
+  await writeBrowserGalleryToDb(legacy);
+}
+
+async function readBrowserGallery() {
+  await migrateLegacyBrowserGalleryToDb();
+  const dbEntries = await readBrowserGalleryFromDb();
+  if (Array.isArray(dbEntries)) return dbEntries;
+  return readBrowserGalleryLegacy();
+}
+
+async function writeBrowserGallery(entries) {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .map((entry) => normalizeBrowserGalleryItem(entry))
+    .filter((entry) => entry.id && entry.mediaUrl)
+    .slice(0, BROWSER_GALLERY_LIMIT);
+  const dbStored = await writeBrowserGalleryToDb(normalized);
+  if (dbStored) return normalized;
+  return writeBrowserGalleryLegacy(normalized);
+}
+
 async function listNoStudioGalleryBrowser({ limit = 18 } = {}) {
   const max = Math.max(1, Number(limit) || 18);
-  const items = readBrowserGallery().slice(0, max);
+  const items = (await readBrowserGallery()).slice(0, max);
   return {
     ok: true,
     count: items.length,
@@ -202,8 +353,9 @@ async function saveNoStudioGalleryBrowser(body) {
     palette,
   });
 
-  const nextEntries = [entry, ...readBrowserGallery().filter((item) => item.id !== entry.id)];
-  writeBrowserGallery(nextEntries);
+  const currentEntries = await readBrowserGallery();
+  const nextEntries = [entry, ...currentEntries.filter((item) => item.id !== entry.id)];
+  await writeBrowserGallery(nextEntries);
   return {
     ok: true,
     item: entry,
@@ -429,10 +581,17 @@ export async function renderNoStudioNoiseGif(body) {
 }
 
 export async function listNoStudioGallery({ limit = 18 } = {}) {
+  if (sharedGalleryUnavailable) {
+    return listNoStudioGalleryBrowser({ limit });
+  }
   try {
-    return await fetchJson(`/api/no-studio/gallery?limit=${encodeURIComponent(String(limit))}`);
+    return await fetchJsonWithTimeout(`/api/no-studio/gallery?limit=${encodeURIComponent(String(limit))}`, {}, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
-    if (isUnavailableApiError(error)) {
+    if (isSharedGalleryConfigError(error)) {
+      sharedGalleryUnavailable = true;
+      return listNoStudioGalleryBrowser({ limit });
+    }
+    if (isUnavailableApiError(error) || isTimeoutApiError(error)) {
       return listNoStudioGalleryBrowser({ limit });
     }
     throw error;
@@ -440,16 +599,23 @@ export async function listNoStudioGallery({ limit = 18 } = {}) {
 }
 
 export async function saveNoStudioGallery(body) {
+  if (sharedGalleryUnavailable) {
+    return saveNoStudioGalleryBrowser(body || {});
+  }
   try {
-    return await fetchJson("/api/no-studio/gallery", {
+    return await fetchJsonWithTimeout("/api/no-studio/gallery", {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify(body || {}),
-    });
+    }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
-    if (isUnavailableApiError(error)) {
+    if (isSharedGalleryConfigError(error)) {
+      sharedGalleryUnavailable = true;
+      return saveNoStudioGalleryBrowser(body || {});
+    }
+    if (isUnavailableApiError(error) || isTimeoutApiError(error)) {
       return saveNoStudioGalleryBrowser(body || {});
     }
     throw error;
