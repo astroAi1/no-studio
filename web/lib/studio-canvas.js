@@ -298,7 +298,7 @@ export class StudioCanvas {
   /**
    * Grid-aware color mapping: each block gets a DIFFERENT mapping.
    * mappingFn(col, row, blockIndex, totalBlocks) → { mapping, roles }
-   * This is what makes Warhol multi-panel and Reinhardt subtle-shift work.
+   * This is what powers multi-panel pop sheets and subtle per-block shifts.
    */
   applyGridMapping(mappingFn) {
     this._pushUndo();
@@ -619,7 +619,6 @@ export class StudioCanvas {
 
     if (this.sheet) {
       this._drawSheet(this.ctx, offsetX, offsetY, scaledSize);
-      this._drawSheetGrid(offsetX, offsetY, scaledSize);
       return;
     }
 
@@ -682,6 +681,14 @@ export class StudioCanvas {
     const sheetHeight = cellSize * rows;
     const startX = offsetX + ((scaledSize - sheetWidth) / 2);
     const startY = offsetY + ((scaledSize - sheetHeight) / 2);
+    const colBounds = [];
+    const rowBounds = [];
+    for (let col = 0; col <= cols; col += 1) {
+      colBounds.push(Math.round(startX + ((col / cols) * sheetWidth)));
+    }
+    for (let row = 0; row <= rows; row += 1) {
+      rowBounds.push(Math.round(startY + ((row / rows) * sheetHeight)));
+    }
 
     targetCtx.save();
     targetCtx.imageSmoothingEnabled = false;
@@ -689,8 +696,12 @@ export class StudioCanvas {
       for (let col = 0; col < cols; col += 1) {
         const tile = this.sheet.tiles[(row * cols) + col];
         if (!tile) continue;
+        const x = colBounds[col];
+        const y = rowBounds[row];
+        const w = Math.max(1, colBounds[col + 1] - colBounds[col]);
+        const h = Math.max(1, rowBounds[row + 1] - rowBounds[row]);
         this.offscreenCtx.putImageData(tile, 0, 0);
-        targetCtx.drawImage(this.offscreen, startX + (col * cellSize), startY + (row * cellSize), cellSize, cellSize);
+        targetCtx.drawImage(this.offscreen, x, y, w, h);
       }
     }
     targetCtx.restore();

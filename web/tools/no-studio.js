@@ -207,6 +207,8 @@ const FAMILY_LABELS = {
   acid: "Acid",
   pastel: "Pastel",
 };
+const POP_SHEET_STYLE_POSTER = "poster-grid";
+const POP_SHEET_STYLE_SCREENPRINT = "screenprint";
 const BRAND_ROLE_BG = "#000000";
 const BRAND_ROLE_FG = "#040404";
 const FAMILY_PROFILES = {
@@ -280,6 +282,23 @@ const NOIR_COLOR_SCHEMES = [
     anchors: ["#0E0B12", "#171420", "#2D2238", "#57505D", "#E0D8CF"],
   },
 ];
+
+function normalizePopSheetStyle(value) {
+  const style = String(value || "").trim().toLowerCase();
+  if (style === POP_SHEET_STYLE_SCREENPRINT) return POP_SHEET_STYLE_SCREENPRINT;
+  if (style === "warhol" || style === POP_SHEET_STYLE_POSTER) return POP_SHEET_STYLE_POSTER;
+  return POP_SHEET_STYLE_POSTER;
+}
+
+function popSheetStyleLabel(value) {
+  const style = normalizePopSheetStyle(value);
+  return style === POP_SHEET_STYLE_SCREENPRINT ? "Screenprint" : "Poster Grid";
+}
+
+function popSheetStyleStatusSlug(value) {
+  const style = normalizePopSheetStyle(value);
+  return style === POP_SHEET_STYLE_SCREENPRINT ? "screenprint" : "poster-grid";
+}
 
 function createDefaultGlobalModifiers() {
   return {
@@ -427,7 +446,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noMinimalPreviewPair: null,
     noFieldLastFamily: "noir",
     popSheetLayout: "2x2",
-    popSheetStyle: "warhol",
+    popSheetStyle: POP_SHEET_STYLE_POSTER,
     isSheetMode: false,
   };
 
@@ -1698,7 +1717,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
     const roleByHex = state.sourceRoleByHex instanceof Map ? state.sourceRoleByHex : new Map();
     const panelCount = cols * rows;
-    const popStyle = styleId === "screenprint" ? "screenprint" : "warhol";
+    const popStyle = normalizePopSheetStyle(styleId);
     const usedSignatures = new Set();
 
     const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => {
@@ -1763,7 +1782,16 @@ export function mountNoStudioTool(root, shellApi = {}) {
             } else if (origHex === "#000000") {
               targetHex = panel.roles?.background || targetHex;
             } else {
-              targetHex = panel.mapping.get(origHex) || origHex;
+              const mappedHex = panel.mapping.get(origHex);
+              if (mappedHex) {
+                targetHex = mappedHex;
+              } else if (role === "accent") {
+                targetHex = mixHex(panel.roles?.outline || targetHex, "#FFFFFF", 0.16);
+              } else if (role === "neutral") {
+                targetHex = mixHex(panel.roles?.background || targetHex, panel.roles?.outline || targetHex, 0.5);
+              } else {
+                targetHex = mixHex(panel.roles?.background || targetHex, panel.roles?.outline || targetHex, 0.34);
+              }
             }
 
             if (popStyle === "screenprint" && role !== "background" && role !== "outline") {
@@ -1807,8 +1835,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.lastReductionMode = "pop-sheet";
     canvas.setSheetTiles(tiles, cols, rows);
     renderVariantPanel();
-    const styleLabel = popStyle === "screenprint" ? "screenprint" : "warhol";
-    setTopbarStatus(`Pop Sheet · ${label} ${styleLabel} · full 24×24 tile per panel`);
+    setTopbarStatus(`Pop Sheet · ${label} ${popSheetStyleStatusSlug(popStyle)} · full 24×24 tile per panel`);
     pulseStudio("surprise");
   }
 
@@ -1829,7 +1856,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return toneCount;
   }
 
-  function createFamilyHueBank(family, bgHue, fm, panelIndex, panelCount, driftNorm, popSheetStyle = "warhol") {
+  function createFamilyHueBank(family, bgHue, fm, panelIndex, panelCount, driftNorm, popSheetStyle = POP_SHEET_STYLE_POSTER) {
     if (family === "mono") {
       const drift = Number(fm.hueDrift) || 0;
       const spread = Math.max(4, drift * 0.9);
@@ -1840,7 +1867,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
     if (family === "warhol") {
       const divergence = clampUnit((Number(fm.panelDivergence) || 0) / 100);
-      if (popSheetStyle === "screenprint") {
+      if (popSheetStyle === POP_SHEET_STYLE_SCREENPRINT) {
         const panelShift = panelCount > 1
           ? (((panelIndex / Math.max(1, panelCount - 1)) - 0.5) * 56 * divergence)
           : 0;
@@ -1879,7 +1906,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     result,
     classified,
     family,
-    { preset = null, traitPhase = 0, panelIndex = 0, panelCount = 1, popSheetStyle = "warhol" } = {},
+    { preset = null, traitPhase = 0, panelIndex = 0, panelCount = 1, popSheetStyle = POP_SHEET_STYLE_POSTER } = {},
   ) {
     const mapping = { ...(result?.mapping || {}) };
     const roles = result?.roles || {};
@@ -1980,7 +2007,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
         levels = Math.max(3, Math.min(5, levels));
       } else if (family === "warhol") {
         const flatness = clampUnit((Number(fm.flatness) || 0) / 100);
-        if (popSheetStyle === "screenprint") {
+        if (popSheetStyle === POP_SHEET_STYLE_SCREENPRINT) {
           sat = clampUnit(0.46 + ((1 - flatness) * 0.24) + (role === "accent" ? 0.08 : 0));
           levels = 4;
           light = clampUnit(0.2 + (rank * 0.56) + (role === "accent" ? 0.05 : 0));
@@ -2035,7 +2062,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     traitPhase = 0,
     panelIndex = 0,
     panelCount = 1,
-    popSheetStyle = "warhol",
+    popSheetStyle = POP_SHEET_STYLE_POSTER,
   } = {}) {
     const toneTarget = familyToneTarget(family);
     const effectivePreset = preset || createUniqueVariant(family, classified);
@@ -2158,8 +2185,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
       ? `
         <div class="variant-title">Pop Sheet Style</div>
         <div class="theory-rail pop-sheet-style-rail">
-          <button class="theory-btn${state.popSheetStyle === "warhol" ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="warhol">Warhol</button>
-          <button class="theory-btn${state.popSheetStyle === "screenprint" ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="screenprint">Screenprint</button>
+          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_POSTER ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="${POP_SHEET_STYLE_POSTER}">Poster Grid</button>
+          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_SCREENPRINT ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="${POP_SHEET_STYLE_SCREENPRINT}">Screenprint</button>
         </div>
         <div class="variant-title">Pop Sheet</div>
         <div class="theory-rail pop-sheet-rail">
@@ -2213,11 +2240,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     if (btn.dataset.action === "set-pop-sheet-style") {
-      const nextStyle = btn.dataset.style === "screenprint" ? "screenprint" : "warhol";
+      const nextStyle = normalizePopSheetStyle(btn.dataset.style);
       state.popSheetStyle = nextStyle;
       renderVariantPanel();
-      const styleLabel = nextStyle === "screenprint" ? "Screenprint" : "Warhol";
-      setTopbarStatus(`Pop Sheet style · ${styleLabel}`);
+      setTopbarStatus(`Pop Sheet style · ${popSheetStyleLabel(nextStyle)}`);
     }
   });
 
@@ -2548,10 +2574,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.activeNoiseTarget = state.globalModifiers.grainTarget || state.activeNoiseTarget;
     state.noiseAmount = Number(state.globalModifiers.grainAmount ?? state.noiseAmount) || state.noiseAmount;
     if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
-    if (savedSession.popSheetStyle === "warhol" || savedSession.popSheetStyle === "screenprint") {
-      state.popSheetStyle = savedSession.popSheetStyle;
+    if (savedSession.popSheetStyle === "warhol" || savedSession.popSheetStyle === "screenprint" || savedSession.popSheetStyle === POP_SHEET_STYLE_POSTER) {
+      state.popSheetStyle = normalizePopSheetStyle(savedSession.popSheetStyle);
     } else if (savedSession.popSheetStyle === "serial") {
-      state.popSheetStyle = "warhol";
+      state.popSheetStyle = POP_SHEET_STYLE_POSTER;
     }
     if (savedSession.gallerySignature) {
       state.gallerySignature = normalizeSignatureHandle(savedSession.gallerySignature);
