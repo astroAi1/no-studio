@@ -447,6 +447,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noFieldLastFamily: "noir",
     popSheetLayout: "2x2",
     popSheetStyle: POP_SHEET_STYLE_POSTER,
+    popSheetBuildNonce: 0,
+    lastPopSheetPanelSignatures: [],
     isSheetMode: false,
   };
 
@@ -1723,6 +1725,13 @@ function panelSignature(result, { style, layout, panelSeed }) {
   return `${style}|${layout}|${panelSeed}|${rolePair}|${palette}`;
 }
 
+function panelVisualSignature(result, { style, layout }) {
+  const rolePair = panelRolePairSignature(result);
+  const palette = makePanelPaletteSignature(result);
+  if (!rolePair || !palette) return "";
+  return `${style}|${layout}|${rolePair}|${palette}`;
+}
+
 function shiftHexHue(hex, hueShift = 0, satMul = 1, lightMul = 1) {
   const rgb = hexToRgb(String(hex || "#000000").toUpperCase());
   const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
@@ -1883,6 +1892,7 @@ function computePopPanelBackground({
   panelIndex,
   panelCount,
   attempt,
+  sheetNonce = 0,
   activeBackgroundHex = null,
 }) {
   const anchorSource = activeBackgroundHex
@@ -1893,7 +1903,7 @@ function computePopPanelBackground({
   const anchorRgb = hexToRgb(anchorSource);
   const anchorHsl = rgbToHsl(anchorRgb.r, anchorRgb.g, anchorRgb.b);
   const progress = panelCount > 1 ? (panelIndex / (panelCount - 1)) : 0;
-  const phase = (((panelIndex + 1) * 37) + (attempt * 23)) % 360;
+  const phase = (((panelIndex + 1) * 37) + (attempt * 23) + (sheetNonce * 41)) % 360;
 
   if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
     const hue = (anchorHsl.h + (progress * 268) + phase + 360) % 360;
@@ -1937,6 +1947,11 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     const roleByHex = state.sourceRoleByHex instanceof Map ? state.sourceRoleByHex : new Map();
     const panelCount = cols * rows;
     const popStyle = normalizePopSheetStyle(styleId);
+    const sheetNonce = (Number(state.popSheetBuildNonce) || 0) + 1;
+    state.popSheetBuildNonce = sheetNonce;
+    const previousPanelSignatures = Array.isArray(state.lastPopSheetPanelSignatures)
+      ? state.lastPopSheetPanelSignatures
+      : [];
     const usedRolePairs = new Set();
     const usedPaletteSignatures = new Set();
     const usedPanelSignatures = new Set();
@@ -1949,16 +1964,21 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     function acceptPanel(result, panelIndex, attempt) {
       const rolePair = panelRolePairSignature(result);
       const paletteSig = makePanelPaletteSignature(result);
+      const visualSig = panelVisualSignature(result, {
+        style: popStyle,
+        layout: layoutId,
+      });
       const panelSig = panelSignature(result, {
         style: popStyle,
         layout: layoutId,
-        panelSeed: panelIndex + (attempt * panelCount),
+        panelSeed: panelIndex + (attempt * panelCount) + (sheetNonce * 997),
       });
       const backgroundHex = String(result?.roles?.background || "").toUpperCase();
-      if (!rolePair || !paletteSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
+      if (!rolePair || !paletteSig || !visualSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
       if (usedRolePairs.has(rolePair)) return false;
       if (usedPaletteSignatures.has(paletteSig)) return false;
       if (usedPanelSignatures.has(panelSig)) return false;
+      if (previousPanelSignatures[panelIndex] && previousPanelSignatures[panelIndex] === visualSig) return false;
       if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
       usedRolePairs.add(rolePair);
       usedPaletteSignatures.add(paletteSig);
@@ -1977,13 +1997,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
           panelIndex,
           panelCount,
           attempt,
+          sheetNonce,
           activeBackgroundHex,
         });
         let result = buildFamilyResult(classified, "warhol", {
           preset,
           backgroundHex,
-          traitPhase: (attempt + 1) * 0.23,
-          panelIndex: panelIndex + (attempt * panelCount),
+          traitPhase: (attempt + 1 + sheetNonce) * 0.23,
+          panelIndex: panelIndex + (attempt * panelCount) + (sheetNonce * panelCount * 3),
           panelCount: panelCount * 2,
           popSheetStyle: popStyle,
         });
@@ -2014,10 +2035,11 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
           panelIndex,
           panelCount,
           attempt: 999 + panelIndex,
+          sheetNonce,
           activeBackgroundHex,
         }),
-        traitPhase: 0.17 + panelIndex,
-        panelIndex,
+        traitPhase: 0.17 + panelIndex + (sheetNonce * 0.11),
+        panelIndex: panelIndex + (sheetNonce * panelCount * 5),
         panelCount,
         popSheetStyle: popStyle,
       });
@@ -2045,13 +2067,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
           panelIndex,
           panelCount,
           attempt: 777 + panelIndex + (force * 7),
+          sheetNonce,
           activeBackgroundHex,
         });
         let forced = buildFamilyResult(classified, "warhol", {
           preset: fallbackPreset,
           backgroundHex: forcedBg,
-          traitPhase: 2.1 + panelIndex + (force * 0.13),
-          panelIndex: panelIndex + (panelCount * (9 + force)),
+          traitPhase: 2.1 + panelIndex + (force * 0.13) + (sheetNonce * 0.17),
+          panelIndex: panelIndex + (panelCount * (9 + force)) + (sheetNonce * panelCount * 7),
           panelCount: panelCount * 4,
           popSheetStyle: popStyle,
         });
@@ -2080,32 +2103,47 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
     const tiles = panelResults.map((panel, panelIndex) => {
       const tile = new Uint8ClampedArray(source.data.length);
+      const panelBackground = String(panel.roles?.background || "#000000").toUpperCase();
+      const panelOutline = String(panel.roles?.outline || "#040404").toUpperCase();
       for (let y = 0; y < source.height; y += 1) {
         for (let x = 0; x < source.width; x += 1) {
           const idx = (y * source.width + x) * 4;
           const alpha = source.data[idx + 3];
-          let targetHex = panel.roles?.background || "#000000";
+          let targetHex = panelBackground;
           if (alpha > 0) {
             const origHex = rgbToHex(source.data[idx], source.data[idx + 1], source.data[idx + 2]).toUpperCase();
             const role = roleByHex.get(origHex) || "body";
+            const isSourceBackground = origHex === "#000000";
             if (origHex === "#040404") {
-              targetHex = panel.roles?.outline || targetHex;
-            } else if (origHex === "#000000") {
-              targetHex = panel.roles?.background || targetHex;
+              targetHex = panelOutline;
+            } else if (isSourceBackground) {
+              targetHex = panelBackground;
             } else {
               const mappedHex = panel.mapping.get(origHex);
               if (mappedHex) {
                 targetHex = mappedHex;
               } else if (role === "accent") {
-                targetHex = mixHex(panel.roles?.outline || targetHex, "#FFFFFF", 0.16);
+                targetHex = mixHex(panelOutline, panelBackground, 0.78);
               } else if (role === "neutral") {
-                targetHex = mixHex(panel.roles?.background || targetHex, panel.roles?.outline || targetHex, 0.5);
+                targetHex = mixHex(panelBackground, panelOutline, 0.62);
               } else {
-                targetHex = mixHex(panel.roles?.background || targetHex, panel.roles?.outline || targetHex, 0.34);
+                targetHex = mixHex(panelBackground, panelOutline, 0.7);
               }
             }
 
-            if (popStyle === POP_SHEET_STYLE_SCREENPRINT && role !== "background" && role !== "outline") {
+            if (!isSourceBackground) {
+              const normalizedTarget = String(targetHex || "").toUpperCase();
+              if (!/^#[0-9A-F]{6}$/.test(normalizedTarget) || normalizedTarget === panelBackground || normalizedTarget === origHex) {
+                targetHex = role === "accent"
+                  ? mixHex(panelOutline, panelBackground, 0.84)
+                  : mixHex(panelBackground, panelOutline, 0.68);
+                if (String(targetHex || "").toUpperCase() === panelBackground) {
+                  targetHex = panelOutline;
+                }
+              }
+            }
+
+            if (popStyle === POP_SHEET_STYLE_SCREENPRINT && !isSourceBackground && origHex !== "#040404") {
               targetHex = applyScreenprintInkMask(targetHex, panel.roles, x, y, panelIndex);
             }
           }
@@ -2123,6 +2161,9 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.noFieldLastFamily = "warhol";
     state.isSheetMode = true;
     state.lastReductionMode = "pop-sheet";
+    state.lastPopSheetPanelSignatures = panelResults.map((panel) => (
+      panelVisualSignature(panel, { style: popStyle, layout: layoutId })
+    ));
     canvas.setSheetTiles(tiles, cols, rows);
     renderVariantPanel();
     setTopbarStatus(`Pop Sheet · ${label} ${popSheetStyleStatusSlug(popStyle)} · full 24×24 tile per panel`);
@@ -2795,6 +2836,8 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.variantByFamily = { mono: null, noir: null, warhol: null, acid: null, pastel: null };
     state.outputSignatures.clear();
     state.outputSignatureOrder = [];
+    state.popSheetBuildNonce = 0;
+    state.lastPopSheetPanelSignatures = [];
     renderPresetList();
     updateExportButtons();
 
