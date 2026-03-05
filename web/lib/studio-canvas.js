@@ -464,10 +464,39 @@ export class StudioCanvas {
       ? tiles.filter((tile) => tile && tile.width === SIZE && tile.height === SIZE)
       : [];
     if (!normalizedTiles.length) return;
+    const safeCols = Math.max(1, Number(cols) || 1);
+    const safeRows = Math.max(1, Number(rows) || 1);
+    const sheetWidth = SIZE * safeCols;
+    const sheetHeight = SIZE * safeRows;
+    const composed = new Uint8ClampedArray(sheetWidth * sheetHeight * 4);
+    for (let row = 0; row < safeRows; row += 1) {
+      for (let col = 0; col < safeCols; col += 1) {
+        const tile = normalizedTiles[(row * safeCols) + col];
+        if (!tile) continue;
+        for (let y = 0; y < SIZE; y += 1) {
+          const sourceStart = y * SIZE * 4;
+          const sourceEnd = sourceStart + (SIZE * 4);
+          const targetStart = (((row * SIZE) + y) * sheetWidth * 4) + (col * SIZE * 4);
+          composed.set(tile.data.slice(sourceStart, sourceEnd), targetStart);
+        }
+      }
+    }
+    const composedImageData = new ImageData(composed, sheetWidth, sheetHeight);
+    const composedCanvas = document.createElement("canvas");
+    composedCanvas.width = sheetWidth;
+    composedCanvas.height = sheetHeight;
+    const composedCtx = composedCanvas.getContext("2d");
+    composedCtx.imageSmoothingEnabled = false;
+    composedCtx.putImageData(composedImageData, 0, 0);
+
     this.sheet = {
       tiles: normalizedTiles.map((tile) => new ImageData(new Uint8ClampedArray(tile.data), tile.width, tile.height)),
-      cols: Math.max(1, Number(cols) || 1),
-      rows: Math.max(1, Number(rows) || 1),
+      cols: safeCols,
+      rows: safeRows,
+      width: sheetWidth,
+      height: sheetHeight,
+      imageData: composedImageData,
+      canvas: composedCanvas,
     };
     const first = this.sheet.tiles[0];
     if (first) {
@@ -556,6 +585,20 @@ export class StudioCanvas {
   }
 
   getCurrentPalette() {
+    if (this.sheet?.imageData) {
+      const seen = new Set();
+      const out = [];
+      const data = this.sheet.imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] === 0) continue;
+        const hex = rgbToHexLocal(data[i], data[i + 1], data[i + 2]);
+        if (!seen.has(hex)) {
+          seen.add(hex);
+          out.push(hex);
+        }
+      }
+      return out;
+    }
     const seen = new Set();
     const out = [];
     for (let i = 0; i < BUFFER_LEN; i += 4) {
@@ -679,31 +722,16 @@ export class StudioCanvas {
     const cellSize = scaledSize / maxAxis;
     const sheetWidth = cellSize * cols;
     const sheetHeight = cellSize * rows;
-    const startX = offsetX + ((scaledSize - sheetWidth) / 2);
-    const startY = offsetY + ((scaledSize - sheetHeight) / 2);
-    const colBounds = [];
-    const rowBounds = [];
-    for (let col = 0; col <= cols; col += 1) {
-      colBounds.push(Math.round(startX + ((col / cols) * sheetWidth)));
-    }
-    for (let row = 0; row <= rows; row += 1) {
-      rowBounds.push(Math.round(startY + ((row / rows) * sheetHeight)));
-    }
+    const startX = Math.round(offsetX + ((scaledSize - sheetWidth) / 2));
+    const startY = Math.round(offsetY + ((scaledSize - sheetHeight) / 2));
+    const drawW = Math.max(1, Math.round(sheetWidth));
+    const drawH = Math.max(1, Math.round(sheetHeight));
+    const composedCanvas = this.sheet.canvas;
+    if (!composedCanvas) return;
 
     targetCtx.save();
     targetCtx.imageSmoothingEnabled = false;
-    for (let row = 0; row < rows; row += 1) {
-      for (let col = 0; col < cols; col += 1) {
-        const tile = this.sheet.tiles[(row * cols) + col];
-        if (!tile) continue;
-        const x = colBounds[col];
-        const y = rowBounds[row];
-        const w = Math.max(1, colBounds[col + 1] - colBounds[col]);
-        const h = Math.max(1, rowBounds[row + 1] - rowBounds[row]);
-        this.offscreenCtx.putImageData(tile, 0, 0);
-        targetCtx.drawImage(this.offscreen, x, y, w, h);
-      }
-    }
+    targetCtx.drawImage(composedCanvas, startX, startY, drawW, drawH);
     targetCtx.restore();
   }
 

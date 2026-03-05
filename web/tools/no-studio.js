@@ -1697,16 +1697,30 @@ export function mountNoStudioTool(root, shellApi = {}) {
   }
 
 function makePanelPaletteSignature(result) {
-    const unique = new Set();
-    const bg = String(result?.roles?.background || "").toUpperCase();
-    const ol = String(result?.roles?.outline || "").toUpperCase();
-    if (/^#[0-9A-F]{6}$/.test(bg)) unique.add(bg);
-    if (/^#[0-9A-F]{6}$/.test(ol)) unique.add(ol);
-    for (const value of Object.values(result?.mapping || {})) {
-      const hex = String(value || "").toUpperCase();
-      if (/^#[0-9A-F]{6}$/.test(hex)) unique.add(hex);
-    }
+  const unique = new Set();
+  const bg = String(result?.roles?.background || "").toUpperCase();
+  const ol = String(result?.roles?.outline || "").toUpperCase();
+  if (/^#[0-9A-F]{6}$/.test(bg)) unique.add(bg);
+  if (/^#[0-9A-F]{6}$/.test(ol)) unique.add(ol);
+  for (const value of Object.values(result?.mapping || {})) {
+    const hex = String(value || "").toUpperCase();
+    if (/^#[0-9A-F]{6}$/.test(hex)) unique.add(hex);
+  }
   return [...unique].sort().join("|");
+}
+
+function panelRolePairSignature(result) {
+  const bg = String(result?.roles?.background || "").toUpperCase();
+  const fg = String(result?.roles?.outline || "").toUpperCase();
+  if (!/^#[0-9A-F]{6}$/.test(bg) || !/^#[0-9A-F]{6}$/.test(fg)) return "";
+  return `${bg}->${fg}`;
+}
+
+function panelSignature(result, { style, layout, panelSeed }) {
+  const rolePair = panelRolePairSignature(result);
+  const palette = makePanelPaletteSignature(result);
+  if (!rolePair || !palette) return "";
+  return `${style}|${layout}|${panelSeed}|${rolePair}|${palette}`;
 }
 
 function shiftHexHue(hex, hueShift = 0, satMul = 1, lightMul = 1) {
@@ -1718,6 +1732,48 @@ function shiftHexHue(hex, hueShift = 0, satMul = 1, lightMul = 1) {
     Math.max(0, Math.min(1, hsl.l * lightMul)),
   );
   return rgbToHex(next.r, next.g, next.b);
+}
+
+function srgbToLinear(channel) {
+  const value = channel / 255;
+  if (value <= 0.04045) return value / 12.92;
+  return ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function hexToOklab(hex) {
+  const rgb = hexToRgb(String(hex || "#000000").toUpperCase());
+  const r = srgbToLinear(rgb.r);
+  const g = srgbToLinear(rgb.g);
+  const b = srgbToLinear(rgb.b);
+  const l = (0.4122214708 * r) + (0.5363325363 * g) + (0.0514459929 * b);
+  const m = (0.2119034982 * r) + (0.6806995451 * g) + (0.1073969566 * b);
+  const s = (0.0883024619 * r) + (0.2817188376 * g) + (0.6299787005 * b);
+  const lRoot = Math.cbrt(l);
+  const mRoot = Math.cbrt(m);
+  const sRoot = Math.cbrt(s);
+  return {
+    L: (0.2104542553 * lRoot) + (0.7936177850 * mRoot) - (0.0040720468 * sRoot),
+    a: (1.9779984951 * lRoot) - (2.4285922050 * mRoot) + (0.4505937099 * sRoot),
+    b: (0.0259040371 * lRoot) + (0.7827717662 * mRoot) - (0.8086757660 * sRoot),
+  };
+}
+
+function oklabDistance(hexA, hexB) {
+  const a = hexToOklab(hexA);
+  const b = hexToOklab(hexB);
+  const dL = a.L - b.L;
+  const da = a.a - b.a;
+  const db = a.b - b.b;
+  return Math.sqrt((dL * dL) + (da * da) + (db * db));
+}
+
+function isBackgroundSeparated(candidateHex, existingHexes, minimumDistance) {
+  for (const existing of existingHexes) {
+    if (oklabDistance(candidateHex, existing) < minimumDistance) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function deriveScreenprintInversePair(backgroundHex) {
@@ -1735,7 +1791,7 @@ function deriveScreenprintInversePair(backgroundHex) {
   return {
     background: rgbToHex(bg.r, bg.g, bg.b),
     outline: rgbToHex(fg.r, fg.g, fg.b),
-    roleStep: 4,
+    roleStep: -4,
   };
 }
 
@@ -1821,20 +1877,55 @@ function diversifyPanelResult(panelResult, panelIndex, classified) {
   };
 }
 
-function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classified, popStyle) {
-  let candidate = panelResult;
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const signature = makePanelPaletteSignature(candidate);
-    if (signature && !usedSignatures.has(signature)) {
-      usedSignatures.add(signature);
-      return candidate;
-    }
-    candidate = diversifyPanelResult(candidate, panelIndex + attempt + 1, classified);
-    if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
-      candidate = applyScreenprintInverseRoleRule(candidate, classified);
-    }
+function computePopPanelBackground({
+  classified,
+  popStyle,
+  panelIndex,
+  panelCount,
+  attempt,
+  activeBackgroundHex = null,
+}) {
+  const anchorSource = activeBackgroundHex
+    || classified.find((entry) => entry.role === "accent")?.hex
+    || classified.find((entry) => entry.role !== "background" && entry.role !== "outline")?.hex
+    || classified[0]?.hex
+    || "#6A6A6A";
+  const anchorRgb = hexToRgb(anchorSource);
+  const anchorHsl = rgbToHsl(anchorRgb.r, anchorRgb.g, anchorRgb.b);
+  const progress = panelCount > 1 ? (panelIndex / (panelCount - 1)) : 0;
+  const phase = (((panelIndex + 1) * 37) + (attempt * 23)) % 360;
+
+  if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+    const hue = (anchorHsl.h + (progress * 268) + phase + 360) % 360;
+    const sat = clampUnit(0.36 + (0.28 * Math.abs(Math.sin(((panelIndex + 1) * 0.61) + (attempt * 0.39)))));
+    const light = clampUnit(0.54 + (0.24 * Math.abs(Math.cos(((panelIndex + 1) * 0.47) + (attempt * 0.33)))));
+    const rgb = hslToRgb(hue, sat, light);
+    return rgbToHex(Math.max(4, rgb.r), Math.max(4, rgb.g), Math.max(4, rgb.b));
   }
-  return candidate;
+
+  const hue = (anchorHsl.h + (progress * 324) + phase + 360) % 360;
+  const sat = clampUnit(0.72 + (0.24 * Math.abs(Math.sin(((panelIndex + 1) * 0.55) + (attempt * 0.31)))));
+  const light = clampUnit(0.36 + (0.3 * Math.abs(Math.cos(((panelIndex + 1) * 0.42) + (attempt * 0.27)))));
+  const rgb = hslToRgb(hue, sat, light);
+  return rgbToHex(rgb.r, rgb.g, rgb.b);
+}
+
+function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
+  const backgroundHex = panelRoles?.background || "#4C4C4C";
+  const figureHex = panelRoles?.outline || "#484848";
+  const seed = (panelIndex * 29) + 11;
+  const halftone = (((x + seed) % 4) === 0) && (((y + (seed % 3)) % 4) === 0);
+  const dropout = (((x * 11) + (y * 7) + seed) % 53) === 0;
+  const density = (((x * 5) + (y * 3) + seed) % 17) < 3;
+  let next = baseHex;
+  if (dropout) {
+    next = mixHex(next, backgroundHex, 0.28);
+  } else if (halftone) {
+    next = mixHex(next, figureHex, 0.2);
+  } else if (density) {
+    next = mixHex(next, backgroundHex, 0.08);
+  }
+  return next;
 }
 
   function applyPopSheet(layoutId = state.popSheetLayout, styleId = state.popSheetStyle) {
@@ -1846,75 +1937,52 @@ function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classi
     const roleByHex = state.sourceRoleByHex instanceof Map ? state.sourceRoleByHex : new Map();
     const panelCount = cols * rows;
     const popStyle = normalizePopSheetStyle(styleId);
-    const usedSignatures = new Set();
+    const usedRolePairs = new Set();
+    const usedPaletteSignatures = new Set();
+    const usedPanelSignatures = new Set();
+    const usedBackgrounds = [];
+    const minimumBgDistance = popStyle === POP_SHEET_STYLE_SCREENPRINT ? 0.07 : 0.1;
+    const activeBackgroundHex = state.useActiveBg
+      ? deriveNoMinimalismPair(selectedActiveHex(), state.noMinimalDeltaMode).background
+      : null;
 
-    // Pre-generate evenly-distributed panel backgrounds.
-    // Poster grid: vivid saturated hues spread across the full color wheel (Warhol Marilyn).
-    // Screenprint: light paper-tinted grounds so rich inks read against them.
-    const preGenPanelBgs = state.useActiveBg ? null : (() => {
-      const accentEntry = classified.find((e) => e.role === "accent")
-        || classified.find((e) => e.role !== "background" && e.role !== "outline")
-        || classified[0];
-      const acRgb = hexToRgb(accentEntry?.hex || "#808080");
-      const acHsl = rgbToHsl(acRgb.r, acRgb.g, acRgb.b);
-      const step = 360 / panelCount;
-      if (popStyle === POP_SHEET_STYLE_POSTER) {
-        // Even hue steps, poster-paint vivid (Warhol Marilyn brightness)
-        const startHue = (acHsl.h + randomInt(12, 36)) % 360;
-        return Array.from({ length: panelCount }, (_, i) => {
-          const hue = (startHue + i * step) % 360;
-          const sat = 0.84 + (Math.random() * 0.13);
-          const lum = 0.44 + (Math.random() * 0.18);
-          const rgb = hslToRgb(hue, sat, lum);
-          return rgbToHex(rgb.r, rgb.g, rgb.b);
-        });
-      }
-      // Screenprint: moderately vivid — enough saturation for printing-ground feel,
-      // slightly darker/more muted than poster so inks read distinctly on top.
-      const startHue = (acHsl.h + randomInt(-16, 16) + 360) % 360;
-      return Array.from({ length: panelCount }, (_, i) => {
-        const hue = (startHue + i * step) % 360;
-        const sat = 0.58 + (Math.random() * 0.22);
-        const lum = 0.30 + (Math.random() * 0.20);
-        const rgb = hslToRgb(hue, sat, lum);
-        return rgbToHex(rgb.r, rgb.g, rgb.b);
+    function acceptPanel(result, panelIndex, attempt) {
+      const rolePair = panelRolePairSignature(result);
+      const paletteSig = makePanelPaletteSignature(result);
+      const panelSig = panelSignature(result, {
+        style: popStyle,
+        layout: layoutId,
+        panelSeed: panelIndex + (attempt * panelCount),
       });
-    })();
+      const backgroundHex = String(result?.roles?.background || "").toUpperCase();
+      if (!rolePair || !paletteSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
+      if (usedRolePairs.has(rolePair)) return false;
+      if (usedPaletteSignatures.has(paletteSig)) return false;
+      if (usedPanelSignatures.has(panelSig)) return false;
+      if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
+      usedRolePairs.add(rolePair);
+      usedPaletteSignatures.add(paletteSig);
+      usedPanelSignatures.add(panelSig);
+      usedBackgrounds.push(backgroundHex);
+      return true;
+    }
 
-    const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => {
-      const backgroundHex = state.useActiveBg
-        ? selectedActiveHex()
-        : (preGenPanelBgs ? preGenPanelBgs[panelIndex % preGenPanelBgs.length] : null);
-
-      if (preGenPanelBgs) {
-        // Pre-generated backgrounds guarantee visual diversity across panels — the
-        // usedSignatures dedup loop is counter-productive here (it exhausts the small
-        // palette space and causes panels to collapse to the same colour).
+    function buildPanelResult(panelIndex) {
+      const maxAttempts = 84;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const preset = createUniqueVariant("warhol", classified);
-        const result = buildFamilyResult(classified, "warhol", {
-          preset,
-          backgroundHex,
-          traitPhase: 0,
+        const backgroundHex = computePopPanelBackground({
+          classified,
+          popStyle,
           panelIndex,
           panelCount,
-          popSheetStyle: popStyle,
+          attempt,
+          activeBackgroundHex,
         });
-        return {
-          preset,
-          mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
-          roles: result.roles,
-        };
-      }
-
-      // Legacy uniqueness-checking path — used only when useActiveBg is active
-      let selected = null;
-
-      for (let attempt = 0; attempt < 96; attempt += 1) {
-        const preset = createUniqueVariant("warhol", classified);
         let result = buildFamilyResult(classified, "warhol", {
           preset,
           backgroundHex,
-          traitPhase: 0,
+          traitPhase: (attempt + 1) * 0.23,
           panelIndex: panelIndex + (attempt * panelCount),
           panelCount: panelCount * 2,
           popSheetStyle: popStyle,
@@ -1922,28 +1990,33 @@ function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classi
         if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
           result = applyScreenprintInverseRoleRule(result, classified);
         }
-        const signature = makePanelPaletteSignature(result);
-        if (!signature || usedSignatures.has(signature)) {
-          continue;
+        if (attempt > 0) {
+          result = diversifyPanelResult(result, panelIndex + attempt, classified);
+          if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+            result = applyScreenprintInverseRoleRule(result, classified);
+          }
         }
-        usedSignatures.add(signature);
-        selected = {
+        if (!acceptPanel(result, panelIndex, attempt)) continue;
+        return {
           preset,
           mapping: new Map(Object.entries(result.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
           roles: result.roles,
         };
-        break;
       }
 
-      if (selected) {
-        return selected;
-      }
-
-      const fallbackPreset = createUniqueVariant("warhol", classified);
+      // Deterministic divergence fallback: never return duplicate panel signatures.
+      let fallbackPreset = createUniqueVariant("warhol", classified);
       let fallback = buildFamilyResult(classified, "warhol", {
         preset: fallbackPreset,
-        backgroundHex,
-        traitPhase: 0,
+        backgroundHex: computePopPanelBackground({
+          classified,
+          popStyle,
+          panelIndex,
+          panelCount,
+          attempt: 999 + panelIndex,
+          activeBackgroundHex,
+        }),
+        traitPhase: 0.17 + panelIndex,
         panelIndex,
         panelCount,
         popSheetStyle: popStyle,
@@ -1951,13 +2024,59 @@ function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classi
       if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
         fallback = applyScreenprintInverseRoleRule(fallback, classified);
       }
-      fallback = ensureUniquePanelResult(fallback, panelIndex, usedSignatures, classified, popStyle);
-      return {
-        preset: fallbackPreset,
-        mapping: new Map(Object.entries(fallback.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
-        roles: fallback.roles,
-      };
-    });
+      for (let force = 0; force < 40; force += 1) {
+        let candidate = diversifyPanelResult(fallback, panelIndex + 11 + force, classified);
+        if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+          candidate = applyScreenprintInverseRoleRule(candidate, classified);
+        }
+        if (!acceptPanel(candidate, panelIndex, 1000 + force)) continue;
+        return {
+          preset: fallbackPreset,
+          mapping: new Map(Object.entries(candidate.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+          roles: candidate.roles,
+        };
+      }
+
+      // Hard uniqueness fallback: deterministic branch nonce until signatures diverge.
+      for (let force = 0; force < 192; force += 1) {
+        const forcedBg = computePopPanelBackground({
+          classified,
+          popStyle,
+          panelIndex,
+          panelCount,
+          attempt: 777 + panelIndex + (force * 7),
+          activeBackgroundHex,
+        });
+        let forced = buildFamilyResult(classified, "warhol", {
+          preset: fallbackPreset,
+          backgroundHex: forcedBg,
+          traitPhase: 2.1 + panelIndex + (force * 0.13),
+          panelIndex: panelIndex + (panelCount * (9 + force)),
+          panelCount: panelCount * 4,
+          popSheetStyle: popStyle,
+        });
+        forced = diversifyPanelResult(forced, panelIndex + 41 + force, classified);
+        if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+          forced = applyScreenprintInverseRoleRule(forced, classified);
+        }
+        if (!acceptPanel(forced, panelIndex, 3000 + force)) continue;
+        return {
+          preset: fallbackPreset,
+          mapping: new Map(Object.entries(forced.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
+          roles: forced.roles,
+        };
+      }
+
+      throw new Error(`Unable to generate unique ${label} pop sheet panel ${panelIndex + 1}`);
+    }
+
+    let panelResults;
+    try {
+      panelResults = Array.from({ length: panelCount }, (_, panelIndex) => buildPanelResult(panelIndex));
+    } catch (error) {
+      setTopbarStatus(error.message || "Pop Sheet render failed");
+      return;
+    }
 
     const tiles = panelResults.map((panel, panelIndex) => {
       const tile = new Uint8ClampedArray(source.data.length);
@@ -1986,24 +2105,8 @@ function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classi
               }
             }
 
-            if (popStyle === "screenprint" && role !== "background" && role !== "outline") {
-              // Screenprint look, but bounded: no foreign color bleed from neighboring traits.
-              const regX = (panelIndex % 3) - 1;
-              const regY = (Math.floor(panelIndex / 3) % 3) - 1;
-              const regPhase = (((x + regX) * 7) + ((y + regY) * 5) + (panelIndex * 11)) % 23;
-              if (regPhase === 0) {
-                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.16);
-              } else if (regPhase === 1) {
-                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFFF", 0.11);
-              }
-
-              const screenDot = (((x * 3) + (y * 2) + panelIndex) % 5) === 0;
-              const inkGrain = (((x * 5) + (y * 7) + (panelIndex * 3)) % 13) === 0;
-              if (screenDot) {
-                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFF0", 0.21);
-              } else if (inkGrain) {
-                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.12);
-              }
+            if (popStyle === POP_SHEET_STYLE_SCREENPRINT && role !== "background" && role !== "outline") {
+              targetHex = applyScreenprintInkMask(targetHex, panel.roles, x, y, panelIndex);
             }
           }
           const rgb = hexToRgb(targetHex);
