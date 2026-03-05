@@ -1696,7 +1696,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return specs[layoutId] || specs["2x2"];
   }
 
-  function makePanelPaletteSignature(result) {
+function makePanelPaletteSignature(result) {
     const unique = new Set();
     const bg = String(result?.roles?.background || "").toUpperCase();
     const ol = String(result?.roles?.outline || "").toUpperCase();
@@ -1706,8 +1706,136 @@ export function mountNoStudioTool(root, shellApi = {}) {
       const hex = String(value || "").toUpperCase();
       if (/^#[0-9A-F]{6}$/.test(hex)) unique.add(hex);
     }
-    return [...unique].sort().join("|");
+  return [...unique].sort().join("|");
+}
+
+function shiftHexHue(hex, hueShift = 0, satMul = 1, lightMul = 1) {
+  const rgb = hexToRgb(String(hex || "#000000").toUpperCase());
+  const hsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
+  const next = hslToRgb(
+    (hsl.h + hueShift + 360) % 360,
+    Math.max(0, Math.min(1, hsl.s * satMul)),
+    Math.max(0, Math.min(1, hsl.l * lightMul)),
+  );
+  return rgbToHex(next.r, next.g, next.b);
+}
+
+function deriveScreenprintInversePair(backgroundHex) {
+  const rgb = hexToRgb(String(backgroundHex || "#404040").toUpperCase());
+  const bg = {
+    r: Math.max(4, Math.min(255, rgb.r)),
+    g: Math.max(4, Math.min(255, rgb.g)),
+    b: Math.max(4, Math.min(255, rgb.b)),
+  };
+  const fg = {
+    r: bg.r - 4,
+    g: bg.g - 4,
+    b: bg.b - 4,
+  };
+  return {
+    background: rgbToHex(bg.r, bg.g, bg.b),
+    outline: rgbToHex(fg.r, fg.g, fg.b),
+    roleStep: 4,
+  };
+}
+
+function applyScreenprintInverseRoleRule(result, classified) {
+  const inversePair = deriveScreenprintInversePair(result?.roles?.background || "#404040");
+  const mapping = { ...(result?.mapping || {}) };
+  const entries = Array.isArray(classified) ? classified : [];
+  const used = new Set([inversePair.background, inversePair.outline]);
+  const forbidden = new Set(entries.map((entry) => String(entry?.hex || "").toUpperCase()));
+  const bgLuma = hexLuma(inversePair.background);
+  const fgLuma = hexLuma(inversePair.outline);
+
+  for (const entry of entries) {
+    const sourceHex = String(entry?.hex || "").toUpperCase();
+    const role = entry?.role || "body";
+    if (!/^#[0-9A-F]{6}$/.test(sourceHex)) continue;
+    if (role === "background") {
+      mapping[sourceHex] = inversePair.background;
+      continue;
+    }
+    if (role === "outline") {
+      mapping[sourceHex] = inversePair.outline;
+      continue;
+    }
+
+    let candidate = String(mapping[sourceHex] || "").toUpperCase();
+    if (!/^#[0-9A-F]{6}$/.test(candidate)) {
+      candidate = role === "accent"
+        ? mixHex(inversePair.outline, "#FFFFFF", 0.25)
+        : mixHex(inversePair.background, inversePair.outline, 0.52);
+    }
+
+    // Keep screenprint inks in a controlled band between inverse role anchors.
+    const candidateLuma = hexLuma(candidate);
+    if (Math.abs(candidateLuma - bgLuma) < 5) {
+      candidate = mixHex(candidate, inversePair.outline, 0.28);
+    }
+    if (Math.abs(candidateLuma - fgLuma) < 3) {
+      candidate = mixHex(candidate, "#FFFFFF", 0.18);
+    }
+
+    mapping[sourceHex] = ensureDistinctHex(candidate, used, { forbidden, floor: -1 });
   }
+
+  return {
+    mapping,
+    roles: {
+      background: inversePair.background,
+      outline: inversePair.outline,
+    },
+  };
+}
+
+function diversifyPanelResult(panelResult, panelIndex, classified) {
+  const entries = Array.isArray(classified) ? classified : [];
+  const hueShift = ((panelIndex + 1) * 23) % 360;
+  const satMul = 0.92 + (((panelIndex % 4) + 1) * 0.03);
+  const lightMul = 0.9 + (((panelIndex % 3) + 1) * 0.04);
+  const roles = panelResult?.roles || {};
+  const mapping = { ...(panelResult?.mapping || {}) };
+  const shiftedRoles = {
+    background: shiftHexHue(roles.background || "#404040", hueShift, satMul, lightMul),
+    outline: shiftHexHue(roles.outline || "#3C3C3C", hueShift, satMul, lightMul),
+  };
+  for (const entry of entries) {
+    const sourceHex = String(entry?.hex || "").toUpperCase();
+    const role = entry?.role || "body";
+    if (!/^#[0-9A-F]{6}$/.test(sourceHex)) continue;
+    if (role === "background") {
+      mapping[sourceHex] = shiftedRoles.background;
+    } else if (role === "outline") {
+      mapping[sourceHex] = shiftedRoles.outline;
+    } else if (/^#[0-9A-F]{6}$/.test(String(mapping[sourceHex] || "").toUpperCase())) {
+      mapping[sourceHex] = shiftHexHue(mapping[sourceHex], hueShift, satMul, lightMul);
+    } else {
+      mapping[sourceHex] = mixHex(shiftedRoles.background, shiftedRoles.outline, role === "accent" ? 0.65 : 0.48);
+    }
+  }
+  return {
+    ...panelResult,
+    mapping,
+    roles: shiftedRoles,
+  };
+}
+
+function ensureUniquePanelResult(panelResult, panelIndex, usedSignatures, classified, popStyle) {
+  let candidate = panelResult;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const signature = makePanelPaletteSignature(candidate);
+    if (signature && !usedSignatures.has(signature)) {
+      usedSignatures.add(signature);
+      return candidate;
+    }
+    candidate = diversifyPanelResult(candidate, panelIndex + attempt + 1, classified);
+    if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+      candidate = applyScreenprintInverseRoleRule(candidate, classified);
+    }
+  }
+  return candidate;
+}
 
   function applyPopSheet(layoutId = state.popSheetLayout, styleId = state.popSheetStyle) {
     if (!state.selected || !state.originalImageData) return;
@@ -1783,7 +1911,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
       for (let attempt = 0; attempt < 96; attempt += 1) {
         const preset = createUniqueVariant("warhol", classified);
-        const result = buildFamilyResult(classified, "warhol", {
+        let result = buildFamilyResult(classified, "warhol", {
           preset,
           backgroundHex,
           traitPhase: 0,
@@ -1791,6 +1919,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
           panelCount: panelCount * 2,
           popSheetStyle: popStyle,
         });
+        if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+          result = applyScreenprintInverseRoleRule(result, classified);
+        }
         const signature = makePanelPaletteSignature(result);
         if (!signature || usedSignatures.has(signature)) {
           continue;
@@ -1809,7 +1940,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       }
 
       const fallbackPreset = createUniqueVariant("warhol", classified);
-      const fallback = buildFamilyResult(classified, "warhol", {
+      let fallback = buildFamilyResult(classified, "warhol", {
         preset: fallbackPreset,
         backgroundHex,
         traitPhase: 0,
@@ -1817,6 +1948,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
         panelCount,
         popSheetStyle: popStyle,
       });
+      if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+        fallback = applyScreenprintInverseRoleRule(fallback, classified);
+      }
+      fallback = ensureUniquePanelResult(fallback, panelIndex, usedSignatures, classified, popStyle);
       return {
         preset: fallbackPreset,
         mapping: new Map(Object.entries(fallback.mapping || {}).map(([k, v]) => [String(k).toUpperCase(), String(v).toUpperCase()])),
@@ -1852,31 +1987,22 @@ export function mountNoStudioTool(root, shellApi = {}) {
             }
 
             if (popStyle === "screenprint" && role !== "background" && role !== "outline") {
-              // Misregistration: each panel has a unique 2px directional ink-layer shift.
-              // At colour boundaries, the off-register layer bleeds in — classic screenprint halo.
-              const regX = ((panelIndex % 3) - 1) * 2;
-              const regY = ((Math.floor(panelIndex / 3) % 3) - 1) * 2;
-              const sx = Math.max(0, Math.min(source.width - 1, x + regX));
-              const sy = Math.max(0, Math.min(source.height - 1, y + regY));
-              const sIdx = (sy * source.width + sx) * 4;
-              if (source.data[sIdx + 3] > 0) {
-                const shiftedHex = rgbToHex(source.data[sIdx], source.data[sIdx + 1], source.data[sIdx + 2]).toUpperCase();
-                const shiftedRole = roleByHex.get(shiftedHex) || "body";
-                if (shiftedRole !== role && shiftedRole !== "background" && shiftedRole !== "outline") {
-                  const shiftedMapped = panel.mapping.get(shiftedHex);
-                  if (shiftedMapped) {
-                    targetHex = mixHex(targetHex, shiftedMapped, 0.30);
-                  }
-                }
+              // Screenprint look, but bounded: no foreign color bleed from neighboring traits.
+              const regX = (panelIndex % 3) - 1;
+              const regY = (Math.floor(panelIndex / 3) % 3) - 1;
+              const regPhase = (((x + regX) * 7) + ((y + regY) * 5) + (panelIndex * 11)) % 23;
+              if (regPhase === 0) {
+                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.16);
+              } else if (regPhase === 1) {
+                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFFF", 0.11);
               }
 
-              // Screen-mesh texture: sparse dropout (ink doesn't fully cover) + ink density grain
               const screenDot = (((x * 3) + (y * 2) + panelIndex) % 5) === 0;
-              const inkGrain = (((x * 5) + (y * 7) + panelIndex * 3) % 13) === 0;
+              const inkGrain = (((x * 5) + (y * 7) + (panelIndex * 3)) % 13) === 0;
               if (screenDot) {
-                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFF0", 0.26);
+                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFF0", 0.21);
               } else if (inkGrain) {
-                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.14);
+                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.12);
               }
             }
           }
