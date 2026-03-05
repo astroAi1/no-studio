@@ -1720,8 +1720,42 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const popStyle = normalizePopSheetStyle(styleId);
     const usedSignatures = new Set();
 
+    // Pre-generate evenly-distributed panel backgrounds.
+    // Poster grid: vivid saturated hues spread across the full color wheel (Warhol Marilyn).
+    // Screenprint: light paper-tinted grounds so rich inks read against them.
+    const preGenPanelBgs = state.useActiveBg ? null : (() => {
+      const accentEntry = classified.find((e) => e.role === "accent")
+        || classified.find((e) => e.role !== "background" && e.role !== "outline")
+        || classified[0];
+      const acRgb = hexToRgb(accentEntry?.hex || "#808080");
+      const acHsl = rgbToHsl(acRgb.r, acRgb.g, acRgb.b);
+      const step = 360 / panelCount;
+      if (popStyle === POP_SHEET_STYLE_POSTER) {
+        // Even hue steps around the wheel, max-saturation poster paint feel
+        const startHue = (acHsl.h + randomInt(12, 36)) % 360;
+        return Array.from({ length: panelCount }, (_, i) => {
+          const hue = (startHue + i * step) % 360;
+          const sat = 0.84 + (Math.random() * 0.13);
+          const lum = 0.34 + (Math.random() * 0.22);
+          const rgb = hslToRgb(hue, sat, lum);
+          return rgbToHex(rgb.r, rgb.g, rgb.b);
+        });
+      }
+      // Screenprint: paper tint — light, nearly achromatic, slightly warm or cool
+      const startHue = (acHsl.h + randomInt(-16, 16) + 360) % 360;
+      return Array.from({ length: panelCount }, (_, i) => {
+        const hue = (startHue + i * step) % 360;
+        const sat = 0.06 + (Math.random() * 0.20);
+        const lum = 0.82 + (Math.random() * 0.12);
+        const rgb = hslToRgb(hue, sat, lum);
+        return rgbToHex(rgb.r, rgb.g, rgb.b);
+      });
+    })();
+
     const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => {
-      const backgroundHex = state.useActiveBg ? selectedActiveHex() : null;
+      const backgroundHex = state.useActiveBg
+        ? selectedActiveHex()
+        : (preGenPanelBgs ? preGenPanelBgs[panelIndex % preGenPanelBgs.length] : null);
       let selected = null;
 
       for (let attempt = 0; attempt < 96; attempt += 1) {
@@ -1795,27 +1829,31 @@ export function mountNoStudioTool(root, shellApi = {}) {
             }
 
             if (popStyle === "screenprint" && role !== "background" && role !== "outline") {
-              const shiftX = panelIndex % 2 === 0 ? 1 : -1;
-              const shiftY = (panelIndex + 1) % 3 === 0 ? 1 : 0;
-              const shouldMisregister = ((x * 3) + (y * 5) + panelIndex) % 11 < 3;
-              if (shouldMisregister) {
-                const sx = Math.max(0, Math.min(source.width - 1, x + shiftX));
-                const sy = Math.max(0, Math.min(source.height - 1, y + shiftY));
-                const sIdx = (sy * source.width + sx) * 4;
-                if (source.data[sIdx + 3] > 0) {
-                  const shiftedHex = rgbToHex(source.data[sIdx], source.data[sIdx + 1], source.data[sIdx + 2]).toUpperCase();
-                  const shiftedRole = roleByHex.get(shiftedHex) || "body";
-                  if (shiftedRole !== "background" && shiftedRole !== "outline") {
-                    targetHex = panel.mapping.get(shiftedHex) || targetHex;
+              // Misregistration: each panel has a unique 2px directional ink-layer shift.
+              // At colour boundaries, the off-register layer bleeds in — classic screenprint halo.
+              const regX = ((panelIndex % 3) - 1) * 2;
+              const regY = ((Math.floor(panelIndex / 3) % 3) - 1) * 2;
+              const sx = Math.max(0, Math.min(source.width - 1, x + regX));
+              const sy = Math.max(0, Math.min(source.height - 1, y + regY));
+              const sIdx = (sy * source.width + sx) * 4;
+              if (source.data[sIdx + 3] > 0) {
+                const shiftedHex = rgbToHex(source.data[sIdx], source.data[sIdx + 1], source.data[sIdx + 2]).toUpperCase();
+                const shiftedRole = roleByHex.get(shiftedHex) || "body";
+                if (shiftedRole !== role && shiftedRole !== "background" && shiftedRole !== "outline") {
+                  const shiftedMapped = panel.mapping.get(shiftedHex);
+                  if (shiftedMapped) {
+                    targetHex = mixHex(targetHex, shiftedMapped, 0.30);
                   }
                 }
               }
 
-              const halftoneDot = ((x + (y * 2) + panelIndex) % 4) === 0 || (((x * 5) + (y * 3) + panelIndex) % 13) === 0;
-              if (halftoneDot) {
-                targetHex = mixHex(targetHex, panel.roles?.background || "#000000", 0.24);
-              } else if (((x + y + panelIndex) % 7) === 0) {
-                targetHex = mixHex(targetHex, "#FFFFFF", 0.08);
+              // Screen-mesh texture: sparse dropout (ink doesn't fully cover) + ink density grain
+              const screenDot = (((x * 3) + (y * 2) + panelIndex) % 5) === 0;
+              const inkGrain = (((x * 5) + (y * 7) + panelIndex * 3) % 13) === 0;
+              if (screenDot) {
+                targetHex = mixHex(targetHex, panel.roles?.background || "#FFFFF0", 0.26);
+              } else if (inkGrain) {
+                targetHex = mixHex(targetHex, panel.roles?.outline || "#040404", 0.14);
               }
             }
           }
@@ -2008,9 +2046,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
       } else if (family === "warhol") {
         const flatness = clampUnit((Number(fm.flatness) || 0) / 100);
         if (popSheetStyle === POP_SHEET_STYLE_SCREENPRINT) {
-          sat = clampUnit(0.46 + ((1 - flatness) * 0.24) + (role === "accent" ? 0.08 : 0));
-          levels = 4;
-          light = clampUnit(0.2 + (rank * 0.56) + (role === "accent" ? 0.05 : 0));
+          // Rich spot-ink palette: saturated enough to read against light paper ground
+          sat = clampUnit(0.70 + ((1 - flatness) * 0.20) + (role === "accent" ? 0.10 : 0));
+          levels = 3;
+          light = clampUnit(0.15 + (rank * 0.42) + (role === "accent" ? 0.10 : 0));
         } else {
           const posterBand = Math.round(clampUnit(rank) * 2) / 2;
           sat = clampUnit(0.84 + ((1 - flatness) * 0.14) + (role === "accent" ? 0.08 : 0));
