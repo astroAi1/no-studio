@@ -1589,7 +1589,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!grain.enabled || !(grain.amount > 0)) {
       throw new Error("Enable grain first to save GIF to No-Gallery");
     }
-    setTopbarStatus("Rendering gallery GIF (optimized)...");
+    setTopbarStatus("No-Render GIF (optimized)...");
     const browserGif = await exportNoiseGifInBrowser({
       size: 512,
       frames: 10,
