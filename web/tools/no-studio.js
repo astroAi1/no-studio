@@ -216,8 +216,17 @@ const FAMILY_LABELS = {
   acid: "Acid",
   pastel: "Pastel",
 };
+const START_MODE_IDS = ["full", "blank"];
+const POP_SHEET_STYLE_SOFT = "soft-poster";
 const POP_SHEET_STYLE_POSTER = "poster-grid";
 const POP_SHEET_STYLE_SCREENPRINT = "screenprint";
+const GRID_HARMONY_PROFILES = {
+  mono: { hueSpan: 8, satMul: [0.92, 1.02], lightMul: [0.9, 1.08], bgScale: 0.35 },
+  chrome: { hueSpan: 12, satMul: [0.9, 1.06], lightMul: [0.92, 1.1], bgScale: 0.42 },
+  warhol: { hueSpan: 18, satMul: [0.94, 1.1], lightMul: [0.92, 1.08], bgScale: 0.48 },
+  acid: { hueSpan: 16, satMul: [0.96, 1.12], lightMul: [0.86, 1.04], bgScale: 0.44 },
+  pastel: { hueSpan: 10, satMul: [0.86, 0.98], lightMul: [0.98, 1.1], bgScale: 0.3 },
+};
 const GRID_FRAME_TONES = {
   black: {
     label: "Black",
@@ -332,19 +341,24 @@ const NOIR_COLOR_SCHEMES = [
 
 function normalizePopSheetStyle(value) {
   const style = String(value || "").trim().toLowerCase();
+  if (style === POP_SHEET_STYLE_SOFT || style === "soft") return POP_SHEET_STYLE_SOFT;
   if (style === POP_SHEET_STYLE_SCREENPRINT) return POP_SHEET_STYLE_SCREENPRINT;
   if (style === "warhol" || style === POP_SHEET_STYLE_POSTER) return POP_SHEET_STYLE_POSTER;
-  return POP_SHEET_STYLE_POSTER;
+  return POP_SHEET_STYLE_SOFT;
 }
 
 function popSheetStyleLabel(value) {
   const style = normalizePopSheetStyle(value);
-  return style === POP_SHEET_STYLE_SCREENPRINT ? "Screenprint" : "Poster Grid";
+  if (style === POP_SHEET_STYLE_SCREENPRINT) return "Screenprint";
+  if (style === POP_SHEET_STYLE_POSTER) return "Poster Grid";
+  return "Soft Poster";
 }
 
 function popSheetStyleStatusSlug(value) {
   const style = normalizePopSheetStyle(value);
-  return style === POP_SHEET_STYLE_SCREENPRINT ? "screenprint" : "poster-grid";
+  if (style === POP_SHEET_STYLE_SCREENPRINT) return "screenprint";
+  if (style === POP_SHEET_STYLE_POSTER) return "poster-grid";
+  return "soft-poster";
 }
 
 function createDefaultGlobalModifiers() {
@@ -540,7 +554,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noFieldLastFamily: "chrome",
     popSheetLayout: "4x4",
     gridFrameTone: "cream",
-    popSheetStyle: POP_SHEET_STYLE_POSTER,
+    popSheetStyle: POP_SHEET_STYLE_SOFT,
     popSheetBuildNonce: 0,
     lastPopSheetPanelSignatures: [],
     isSheetMode: false,
@@ -1061,6 +1075,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function renderStartModeRail() {
     if (!els.startModeRail) return;
+    if (!START_MODE_IDS.includes(state.startMode)) {
+      state.startMode = "full";
+    }
     els.startModeRail.querySelectorAll("[data-start-mode]").forEach((btn) => {
       btn.classList.toggle("is-active", btn.dataset.startMode === state.startMode);
     });
@@ -1117,7 +1134,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function applyStartMode(mode = state.startMode, { quiet = false } = {}) {
     if (!state.selected) return false;
-    const nextMode = ["full", "silhouette", "blank"].includes(mode) ? mode : "full";
+    const nextMode = START_MODE_IDS.includes(mode) ? mode : "full";
     state.startMode = nextMode;
     if (nextMode === "blank") {
       state.sourceOverlayVisible = false;
@@ -1129,8 +1146,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (nextMode === "full") {
       canvas.reset();
       changed = true;
-    } else if (nextMode === "silhouette") {
-      changed = canvas.startSilhouette(selectedActiveHex());
     } else if (nextMode === "blank") {
       changed = canvas.startBlankCanvas();
     }
@@ -1139,9 +1154,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!quiet) {
       setTopbarStatus(nextMode === "full"
         ? "Full source start restored"
-        : nextMode === "silhouette"
-          ? "Silhouette start armed"
-          : "Blank 24x24 start armed");
+        : "Blank 24x24 start armed");
     }
     persistSession();
     return changed;
@@ -2281,7 +2294,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function getPopSheetSpec(layoutId) {
     const specs = {
-      "1x3": { cols: 1, rows: 3, label: "1x3" },
+      "1x3": { cols: 3, rows: 1, label: "1x3" },
       "2x2": { cols: 2, rows: 2, label: "2x2" },
       "3x3": { cols: 3, rows: 3, label: "3x3" },
       "4x4": { cols: 4, rows: 4, label: "4x4" },
@@ -2326,6 +2339,85 @@ export function mountNoStudioTool(root, shellApi = {}) {
       if (visibleCount >= 4) return true;
     }
     return false;
+  }
+
+  function gridHarmonySignal(panelIndex, panelCount) {
+    const progress = panelCount > 1 ? (panelIndex / Math.max(1, panelCount - 1)) : 0.5;
+    const centered = progress - 0.5;
+    const wave = Math.sin((panelIndex + 1) * 1.61803398875);
+    return { progress, centered, wave };
+  }
+
+  function buildHarmonicGridVariant({
+    family,
+    panelIndex,
+    panelCount,
+    posterize = false,
+  }) {
+    const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
+    const profile = GRID_HARMONY_PROFILES[safeFamily] || GRID_HARMONY_PROFILES.chrome;
+    const classified = currentCreativeClassification();
+    const basePair = canvas.getGlobalRolePair();
+    const { centered, wave } = gridHarmonySignal(panelIndex, panelCount);
+    const hueShift = (centered * profile.hueSpan * 1.35) + (wave * profile.hueSpan * 0.35);
+    const satMix = clampUnit(0.5 + (centered * 0.9) + (wave * 0.18));
+    const lightMix = clampUnit(0.5 + (centered * 0.56) - (wave * 0.14));
+    const satMul = lerp(profile.satMul[0], profile.satMul[1], satMix) * (posterize ? 1.04 : 1);
+    const lightMul = lerp(profile.lightMul[0], profile.lightMul[1], lightMix) * (posterize ? 0.99 : 1);
+    const backgroundHex = mixHex(
+      basePair.background,
+      shiftHexHue(basePair.background, hueShift * profile.bgScale * (posterize ? 1.15 : 1), satMul, lightMul),
+      posterize ? 0.82 : 0.58,
+    );
+    const roles = canvas.enforceBgOutlineRule(backgroundHex);
+    const mapping = {};
+
+    for (const entry of classified) {
+      const sourceHex = String(entry?.hex || "").toUpperCase();
+      if (!/^#[0-9A-F]{6}$/.test(sourceHex)) continue;
+      if (entry.role === "background" || entry.role === "outline") continue;
+      const roleScale = entry.role === "accent" ? 1.16 : entry.role === "neutral" ? 0.72 : 0.92;
+      const roleSatMul = entry.role === "accent" ? satMul * 1.04 : entry.role === "neutral" ? satMul * 0.95 : satMul;
+      const roleLightMul = entry.role === "accent" && posterize ? lightMul * 1.03 : lightMul;
+      let candidate = shiftHexHue(sourceHex, hueShift * roleScale, roleSatMul, roleLightMul);
+      candidate = mixHex(sourceHex, candidate, posterize ? 0.76 : 0.54);
+      if (candidate === roles.background) {
+        candidate = mixHex(candidate, roles.outline, 0.16);
+      }
+      if (candidate === roles.outline) {
+        candidate = mixHex(candidate, "#FFFFFF", 0.1);
+      }
+      mapping[sourceHex] = candidate;
+    }
+
+    const palette = normalizeHexPalette([
+      roles.background,
+      roles.outline,
+      ...Object.values(mapping),
+    ]);
+
+    return {
+      family: safeFamily,
+      id: `grid-${safeFamily}-${panelCount}-${panelIndex}-${posterize ? "poster" : "harmony"}`,
+      name: posterize
+        ? `${FAMILY_LABELS[safeFamily] || "Studio"} Poster ${panelIndex + 1}`
+        : `${FAMILY_LABELS[safeFamily] || "Studio"} Harmony ${panelIndex + 1}`,
+      mapping,
+      roles,
+      rolePair: {
+        background: roles.background,
+        figure: roles.outline,
+        mode: state.noMinimalDeltaMode,
+        roleStep: 4,
+      },
+      palette,
+      paletteSignature: makePaletteSignature(palette),
+      sourcePaletteSignature: currentSourcePaletteSignature(),
+      score: posterize ? 89.5 : 91.5,
+      ui: {
+        chips: [posterize ? "posterized" : "harmonic grid"],
+      },
+    };
   }
 
 function makePanelPaletteSignature(result) {
@@ -2610,13 +2702,17 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.popSheetBuildNonce = sheetNonce;
     const compositionState = canvas.exportCompositionState();
     const baseTile = canvas.exportCompositionImageData();
+    const variants = Array.from({ length: Math.max(0, panelCount - 1) }, (_, index) => (
+      buildHarmonicGridVariant({
+        family,
+        panelIndex: index + 1,
+        panelCount,
+      })
+    ));
 
     const tiles = [
       baseTile,
     ];
-    const wantedVariants = Math.max(0, panelCount - 1);
-    const pageSpan = Math.max(1, Math.ceil(Math.max(1, wantedVariants) / DEFAULT_RAIL_PAGE_SIZE));
-    const variants = collectGridVariants(family, wantedVariants, (sheetNonce - 1) * pageSpan);
     for (const variant of variants) {
       const tile = canvas.buildMappedImageData(variant.mapping, variant.roles);
       tiles.push(tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile));
@@ -2675,6 +2771,47 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     const activeBackgroundHex = state.useActiveBg
       ? deriveNoMinimalismPair(selectedActiveHex(), state.noMinimalDeltaMode).background
       : null;
+
+    if (popStyle === POP_SHEET_STYLE_SOFT) {
+      const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => (
+        buildHarmonicGridVariant({
+          family: "warhol",
+          panelIndex,
+          panelCount,
+          posterize: true,
+        })
+      ));
+      const tiles = panelResults.map((panel) => {
+        const tile = canvas.buildMappedImageData(panel.mapping, panel.roles);
+        return tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile);
+      });
+      state.variantByFamily.warhol = {
+        family: "warhol",
+        id: `warhol-sheet-${sheetNonce}`,
+        name: `Pop Sheet · ${label}`,
+        palette: [],
+        roles: panelResults[0]?.roles || {
+          background: "#000000",
+          outline: "#040404",
+        },
+        ui: {
+          chips: ["pop sheet", popSheetStyleLabel(popStyle)],
+        },
+      };
+      state.activeStudioVariant = null;
+      state.activeStudioProvenance = null;
+      state.noFieldLastFamily = "warhol";
+      state.isSheetMode = true;
+      state.lastReductionMode = "pop-sheet";
+      state.lastPopSheetPanelSignatures = panelResults.map((panel) => (
+        panelVisualSignature(panel, { style: popStyle, layout: layoutId })
+      ));
+      canvas.setSheetTiles(tiles, cols, rows, currentGridFrameStyle());
+      renderVariantPanel();
+      setTopbarStatus(`Pop Sheet · ${label} ${popSheetStyleStatusSlug(popStyle)} · harmonic poster panels`);
+      pulseStudio("surprise");
+      return;
+    }
 
     function acceptPanel(result, panelIndex, attempt) {
       const rolePair = panelRolePairSignature(result);
@@ -3219,9 +3356,16 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
           <button class="theory-btn${state.gridFrameTone === toneId ? " is-active" : ""}" type="button" data-action="set-grid-frame-tone" data-frame-tone="${toneId}">${escapeHtml(tone.label)}</button>
         `).join("")}
       </div>
+      ${activeTab === "warhol" ? `
+        <div class="theory-rail pop-sheet-rail">
+          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_SOFT ? " is-active" : ""}" type="button" data-action="set-pop-style" data-pop-style="${POP_SHEET_STYLE_SOFT}">Soft</button>
+          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_POSTER ? " is-active" : ""}" type="button" data-action="set-pop-style" data-pop-style="${POP_SHEET_STYLE_POSTER}">Poster</button>
+          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_SCREENPRINT ? " is-active" : ""}" type="button" data-action="set-pop-style" data-pop-style="${POP_SHEET_STYLE_SCREENPRINT}">Screen</button>
+        </div>
+      ` : ""}
       <div class="variant-action-grid">
         <button class="preset-btn" type="button" data-action="build-grid">Build Grid</button>
-        ${activeTab === "warhol" ? `<button class="preset-btn" type="button" data-action="build-pop-sheet">Pop Posterize</button>` : ""}
+        ${activeTab === "warhol" ? `<button class="preset-btn" type="button" data-action="build-pop-sheet">Posterize</button>` : ""}
       </div>
     `;
 
@@ -3270,6 +3414,13 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       state.popSheetLayout = btn.dataset.layout || "4x4";
       renderVariantPanel();
       setTopbarStatus(`Grid layout ${state.popSheetLayout} armed`);
+      persistSession();
+      return;
+    }
+    if (btn.dataset.action === "set-pop-style") {
+      state.popSheetStyle = normalizePopSheetStyle(btn.dataset.popStyle || POP_SHEET_STYLE_SOFT);
+      renderVariantPanel();
+      setTopbarStatus(`Posterize style ${popSheetStyleLabel(state.popSheetStyle)} armed`);
       persistSession();
       return;
     }
@@ -3715,10 +3866,15 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     if (savedSession.gridFrameTone && GRID_FRAME_TONES[savedSession.gridFrameTone]) {
       state.gridFrameTone = savedSession.gridFrameTone;
     }
-    if (savedSession.popSheetStyle === "warhol" || savedSession.popSheetStyle === "screenprint" || savedSession.popSheetStyle === POP_SHEET_STYLE_POSTER) {
+    if (
+      savedSession.popSheetStyle === "warhol"
+      || savedSession.popSheetStyle === "screenprint"
+      || savedSession.popSheetStyle === POP_SHEET_STYLE_POSTER
+      || savedSession.popSheetStyle === POP_SHEET_STYLE_SOFT
+    ) {
       state.popSheetStyle = normalizePopSheetStyle(savedSession.popSheetStyle);
     } else if (savedSession.popSheetStyle === "serial") {
-      state.popSheetStyle = POP_SHEET_STYLE_POSTER;
+      state.popSheetStyle = POP_SHEET_STYLE_SOFT;
     }
     if (savedSession.gallerySignature) {
       state.gallerySignature = normalizeSignatureHandle(savedSession.gallerySignature);

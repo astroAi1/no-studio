@@ -76,7 +76,6 @@ export function createStudioTemplate() {
               </div>
               <div class="theory-rail canvas-start-rail" data-role="start-mode-rail">
                 <button class="theory-btn is-active" type="button" data-start-mode="full">Full</button>
-                <button class="theory-btn" type="button" data-start-mode="silhouette">Silhouette</button>
                 <button class="theory-btn" type="button" data-start-mode="blank">Blank</button>
               </div>
             </div>
