@@ -31,6 +31,7 @@ let browserGalleryMigrationDone = false;
 let browserGalleryLegacyPurgeDone = false;
 let sharedGalleryUnavailable = false;
 let globalGalleryEnabled = false;
+let studioConfigLoaded = false;
 
 function getNoGalleryViewerId() {
   try {
@@ -139,6 +140,65 @@ function isRecoverableGalleryWriteError(error) {
   }
   const status = Number(error?.status);
   return Number.isFinite(status) && status >= 500;
+}
+
+function sharedGalleryUnavailableMessage() {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    return "Shared No-Gallery is not configured for this deployment";
+  }
+  return "Shared No-Gallery is unavailable right now";
+}
+
+function buildUnavailableGalleryList({ limit = 18 } = {}) {
+  return {
+    ok: true,
+    count: 0,
+    items: [],
+    storage: "unavailable",
+    unavailable: true,
+    message: sharedGalleryUnavailableMessage(),
+    limit: Math.max(1, Number(limit) || 18),
+  };
+}
+
+function buildUnavailableGalleryHome({ sort = "new" } = {}) {
+  return {
+    ok: true,
+    storage: "unavailable",
+    global: false,
+    unavailable: true,
+    message: sharedGalleryUnavailableMessage(),
+    liveWeek: null,
+    activeWeek: null,
+    archiveWeeks: [],
+    archives: [],
+    sort: String(sort || "new").toLowerCase() === "top" ? "top" : "new",
+  };
+}
+
+function buildUnavailableGalleryWeek({ weekId = "", sort = "new" } = {}) {
+  return {
+    ok: true,
+    storage: "unavailable",
+    unavailable: true,
+    message: sharedGalleryUnavailableMessage(),
+    count: 0,
+    items: [],
+    week: weekId ? {
+      weekId: String(weekId || ""),
+      startedAt: null,
+      endsAt: null,
+      closedAt: null,
+      weekState: "unavailable",
+    } : null,
+    sort: String(sort || "new").toLowerCase() === "top" ? "top" : "new",
+  };
+}
+
+function throwSharedGalleryUnavailable() {
+  const error = new Error(sharedGalleryUnavailableMessage());
+  error.code = "NO_GALLERY_UNAVAILABLE";
+  throw error;
 }
 
 function sanitizeSignatureHandle(value) {
@@ -680,10 +740,12 @@ export async function getHealth() {
 export async function getNoStudioConfig() {
   try {
     const payload = await fetchJson("/api/no-studio/config");
+    studioConfigLoaded = true;
     globalGalleryEnabled = payload?.globalGalleryEnabled === true;
     sharedGalleryUnavailable = false;
     return payload;
   } catch {
+    studioConfigLoaded = true;
     globalGalleryEnabled = STATIC_STUDIO_CONFIG.globalGalleryEnabled === true;
     return { ...STATIC_STUDIO_CONFIG };
   }
@@ -756,8 +818,11 @@ export async function listNoStudioGallery({
   signature = null,
   sort = "new",
 } = {}) {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    return buildUnavailableGalleryList({ limit });
+  }
   if (sharedGalleryUnavailable) {
-    return listNoStudioGalleryBrowser({ limit });
+    return buildUnavailableGalleryList({ limit });
   }
   const params = new URLSearchParams({
     limit: String(limit),
@@ -777,12 +842,14 @@ export async function listNoStudioGallery({
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isSharedGalleryConfigError(error)) {
+      studioConfigLoaded = true;
+      globalGalleryEnabled = false;
       sharedGalleryUnavailable = true;
-      return listNoStudioGalleryBrowser({ limit });
+      return buildUnavailableGalleryList({ limit });
     }
     if (isUnavailableApiError(error) || isTimeoutApiError(error)) {
       sharedGalleryUnavailable = true;
-      return listNoStudioGalleryBrowser({ limit });
+      return buildUnavailableGalleryList({ limit });
     }
     throw error;
   }
@@ -793,8 +860,11 @@ export async function getNoStudioGalleryHome({
   liveLimit = 120,
   archiveLimit = 24,
 } = {}) {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    return buildUnavailableGalleryHome({ sort });
+  }
   if (sharedGalleryUnavailable) {
-    return getNoStudioGalleryHomeBrowser({ sort, liveLimit });
+    return buildUnavailableGalleryHome({ sort });
   }
   const params = new URLSearchParams({
     sort: String(sort || "new"),
@@ -810,8 +880,12 @@ export async function getNoStudioGalleryHome({
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      if (isSharedGalleryConfigError(error)) {
+        studioConfigLoaded = true;
+        globalGalleryEnabled = false;
+      }
       sharedGalleryUnavailable = true;
-      return getNoStudioGalleryHomeBrowser({ sort, liveLimit });
+      return buildUnavailableGalleryHome({ sort });
     }
     throw error;
   }
@@ -822,8 +896,11 @@ export async function getNoStudioGalleryWeek(weekId, {
   limit = 120,
   offset = 0,
 } = {}) {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    return buildUnavailableGalleryWeek({ weekId, sort });
+  }
   if (sharedGalleryUnavailable) {
-    return getNoStudioGalleryWeekBrowser(weekId, { sort, limit, offset });
+    return buildUnavailableGalleryWeek({ weekId, sort });
   }
   const params = new URLSearchParams({
     sort: String(sort || "new"),
@@ -839,16 +916,23 @@ export async function getNoStudioGalleryWeek(weekId, {
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      if (isSharedGalleryConfigError(error)) {
+        studioConfigLoaded = true;
+        globalGalleryEnabled = false;
+      }
       sharedGalleryUnavailable = true;
-      return getNoStudioGalleryWeekBrowser(weekId, { sort, limit, offset });
+      return buildUnavailableGalleryWeek({ weekId, sort });
     }
     throw error;
   }
 }
 
 export async function saveNoStudioGallery(body) {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    throwSharedGalleryUnavailable();
+  }
   if (sharedGalleryUnavailable) {
-    return saveNoStudioGalleryBrowser(body || {});
+    throwSharedGalleryUnavailable();
   }
   try {
     return await fetchJsonWithTimeout("/api/no-studio/gallery", {
@@ -860,16 +944,23 @@ export async function saveNoStudioGallery(body) {
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isRecoverableGalleryWriteError(error)) {
+      if (isSharedGalleryConfigError(error)) {
+        studioConfigLoaded = true;
+        globalGalleryEnabled = false;
+      }
       sharedGalleryUnavailable = true;
-      return saveNoStudioGalleryBrowser(body || {});
+      throwSharedGalleryUnavailable();
     }
     throw error;
   }
 }
 
 export async function voteNoStudioGallery(id, reaction = "no") {
+  if (studioConfigLoaded && globalGalleryEnabled !== true) {
+    throwSharedGalleryUnavailable();
+  }
   if (sharedGalleryUnavailable) {
-    return reactNoStudioGalleryBrowser(id, reaction);
+    throwSharedGalleryUnavailable();
   }
   const viewerId = getNoGalleryViewerId();
   try {
@@ -883,8 +974,12 @@ export async function voteNoStudioGallery(id, reaction = "no") {
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      if (isSharedGalleryConfigError(error)) {
+        studioConfigLoaded = true;
+        globalGalleryEnabled = false;
+      }
       sharedGalleryUnavailable = true;
-      return reactNoStudioGalleryBrowser(id, reaction);
+      throwSharedGalleryUnavailable();
     }
     throw error;
   }

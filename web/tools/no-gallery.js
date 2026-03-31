@@ -59,7 +59,7 @@ function reactionLabel(item) {
 
 function buildReactionMarkup(item, storage = "sqlite") {
   const reaction = String(item?.viewerReaction || "").trim().toLowerCase();
-  const disabled = storage !== "sqlite" && storage !== "browser";
+  const disabled = storage !== "sqlite";
   const locked = String(item?.weekState || "live") === "archived";
   return `
     <div class="no-gallery-reactions">
@@ -230,6 +230,22 @@ export function mountNoGalleryPage(root) {
       return;
     }
 
+    if (state.storage === "unavailable") {
+      const message = state.week?.message || state.home?.message || "Shared No-Gallery is unavailable right now.";
+      if (els.liveWeekTitle) {
+        els.liveWeekTitle.textContent = "No-Gallery Offline";
+      }
+      if (els.backHome) els.backHome.hidden = true;
+      if (els.archiveSection) els.archiveSection.hidden = false;
+      if (els.liveGrid) {
+        els.liveGrid.innerHTML = `<div class="no-gallery-empty">${escapeHtml(message)}</div>`;
+      }
+      if (els.archiveGrid) {
+        els.archiveGrid.innerHTML = "";
+      }
+      return;
+    }
+
     if (state.mode === "week" && state.week?.week) {
       const week = state.week.week;
       if (els.liveWeekTitle) {
@@ -277,6 +293,13 @@ export function mountNoGalleryPage(root) {
       state.home = payload;
       state.week = null;
       state.storage = String(payload?.storage || "sqlite");
+    } catch (error) {
+      state.home = {
+        storage: "unavailable",
+        message: error?.message || "Shared No-Gallery is unavailable right now.",
+      };
+      state.week = null;
+      state.storage = "unavailable";
     } finally {
       state.loading = false;
       render();
@@ -291,6 +314,13 @@ export function mountNoGalleryPage(root) {
       state.week = payload;
       state.mode = "week";
       state.storage = String(payload?.storage || state.home?.storage || "sqlite");
+    } catch (error) {
+      state.week = {
+        storage: "unavailable",
+        message: error?.message || "Shared No-Gallery is unavailable right now.",
+      };
+      state.mode = "home";
+      state.storage = "unavailable";
     } finally {
       state.loading = false;
       render();
@@ -325,8 +355,19 @@ export function mountNoGalleryPage(root) {
       const id = String(reactionButton.getAttribute("data-react-id") || "");
       const reaction = String(reactionButton.getAttribute("data-reaction") || "no");
       if (!id) return;
-      const payload = await voteNoStudioGallery(id, reaction);
-      replaceItem(payload?.item || null);
+      try {
+        const payload = await voteNoStudioGallery(id, reaction);
+        replaceItem(payload?.item || null);
+      } catch (error) {
+        state.storage = "unavailable";
+        state.home = {
+          storage: "unavailable",
+          message: error?.message || "Shared No-Gallery is unavailable right now.",
+        };
+        state.week = null;
+        state.mode = "home";
+        render();
+      }
       return;
     }
   });

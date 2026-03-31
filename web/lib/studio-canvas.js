@@ -203,6 +203,10 @@ export class StudioCanvas {
       sourceOpacity: 0.18,
       showNoiseMask: false,
     };
+    this.singleFrame = {
+      enabled: false,
+      style: normalizeSheetStyle(DEFAULT_SHEET_STYLE),
+    };
 
     this.sheet = null;
 
@@ -245,7 +249,7 @@ export class StudioCanvas {
     this.display.addEventListener("touchend", this._onTouchEnd);
     this.display.addEventListener("touchcancel", this._onTouchEnd);
 
-    this._touchState = { active: false, startDist: 0, startZoom: 1, lastCenter: null };
+    this._touchState = { active: false, mode: null, startDist: 0, startZoom: 1, lastCenter: null };
     this.display.style.cursor = "crosshair";
   }
 
@@ -345,6 +349,30 @@ export class StudioCanvas {
 
   getGlobalRolePair() {
     return { ...this.globalRolePair };
+  }
+
+  setSingleFrame({ enabled = false, style = {} } = {}) {
+    const next = {
+      enabled: Boolean(enabled),
+      style: normalizeSheetStyle(style),
+    };
+    const changed = (
+      next.enabled !== Boolean(this.singleFrame?.enabled)
+      || next.style.frameFill !== this.singleFrame?.style?.frameFill
+      || next.style.frameStroke !== this.singleFrame?.style?.frameStroke
+    );
+    if (!changed) return false;
+    this.singleFrame = next;
+    this.render();
+    this.onChange?.();
+    return true;
+  }
+
+  getSingleFrame() {
+    return {
+      enabled: Boolean(this.singleFrame?.enabled),
+      style: normalizeSheetStyle(this.singleFrame?.style),
+    };
   }
 
   setTool(tool) {
@@ -761,7 +789,11 @@ export class StudioCanvas {
   }
 
   exportCompositionImageData() {
-    return this.exportImageData();
+    return this._buildMappedImageDataForComposition({
+      roleGrid: this.roleGrid,
+      contentGrid: this.contentGrid,
+      globalRolePair: this.globalRolePair,
+    });
   }
 
   exportPng1024(options = {}) {
@@ -780,9 +812,12 @@ export class StudioCanvas {
       this._drawGrain(ctx, 0, 0, 1024, grainOverride);
       return temp;
     }
-    this.offscreenCtx.putImageData(this.exportImageData(), 0, 0);
-    ctx.drawImage(this.offscreen, 0, 0, 1024, 1024);
-    this._drawGrain(ctx, 0, 0, 1024, grainOverride);
+    this.offscreenCtx.putImageData(this.exportCompositionImageData(), 0, 0);
+    this._drawSinglePresentation(ctx, 0, 0, 1024, {
+      grainOverride,
+      showGrid: false,
+      includeOverlay: false,
+    });
     return temp;
   }
 
@@ -794,7 +829,7 @@ export class StudioCanvas {
   }
 
   getCompositionPalette() {
-    return uniquePaletteFromData(this.buffer);
+    return uniquePaletteFromData(this.exportCompositionImageData().data);
   }
 
   getOriginalPalette() {
@@ -855,19 +890,58 @@ export class StudioCanvas {
       return;
     }
 
-    this.ctx.imageSmoothingEnabled = false;
-    this.ctx.drawImage(this.offscreen, offsetX, offsetY, scaledSize, scaledSize);
+    this._drawSinglePresentation(this.ctx, offsetX, offsetY, scaledSize);
+  }
 
-    if (this.overlay.sourceVisible) {
-      this.ctx.save();
-      this.ctx.globalAlpha = this.overlay.sourceOpacity;
-      this.ctx.drawImage(this.sourceCanvas, offsetX, offsetY, scaledSize, scaledSize);
-      this.ctx.restore();
+  _drawSinglePresentation(targetCtx, offsetX, offsetY, scaledSize, {
+    grainOverride = null,
+    showGrid = true,
+    includeOverlay = true,
+  } = {}) {
+    const layout = this._getSingleLayout(targetCtx, offsetX, offsetY, scaledSize);
+    targetCtx.imageSmoothingEnabled = false;
+    targetCtx.drawImage(this.offscreen, layout.artX, layout.artY, layout.artSize, layout.artSize);
+
+    if (includeOverlay && this.overlay.sourceVisible) {
+      targetCtx.save();
+      targetCtx.globalAlpha = this.overlay.sourceOpacity;
+      targetCtx.drawImage(this.sourceCanvas, layout.artX, layout.artY, layout.artSize, layout.artSize);
+      targetCtx.restore();
     }
 
-    this._drawGrain(this.ctx, offsetX, offsetY, scaledSize);
-    this._drawNoiseMaskOverlay(offsetX, offsetY, scaledSize);
-    this._drawGrid(offsetX, offsetY, scaledSize);
+    this._drawGrain(targetCtx, layout.artX, layout.artY, layout.artSize, grainOverride);
+    this._drawNoiseMaskOverlay(layout.artX, layout.artY, layout.artSize);
+    if (showGrid) {
+      this._drawGrid(layout.artX, layout.artY, layout.artSize);
+    }
+  }
+
+  _getSingleLayout(targetCtx, offsetX, offsetY, scaledSize) {
+    const framed = Boolean(this.singleFrame?.enabled);
+    if (!framed) {
+      return {
+        framed: false,
+        artX: offsetX,
+        artY: offsetY,
+        artSize: scaledSize,
+      };
+    }
+    const style = normalizeSheetStyle(this.singleFrame?.style);
+    const mat = Math.max(10, Math.round(scaledSize * 0.065));
+    const artSize = Math.max(1, scaledSize - (mat * 2));
+    targetCtx.save();
+    targetCtx.fillStyle = style.frameFill;
+    targetCtx.fillRect(offsetX, offsetY, scaledSize, scaledSize);
+    targetCtx.strokeStyle = style.frameStroke;
+    targetCtx.lineWidth = Math.max(1, Math.round(scaledSize * 0.025));
+    targetCtx.strokeRect(offsetX + mat, offsetY + mat, artSize, artSize);
+    targetCtx.restore();
+    return {
+      framed: true,
+      artX: offsetX + mat,
+      artY: offsetY + mat,
+      artSize,
+    };
   }
 
   _drawNoiseMaskOverlay(offsetX, offsetY, scaledSize) {
@@ -1044,35 +1118,19 @@ export class StudioCanvas {
   }
 
   buildMappedImageData(mapping = {}, roles = {}) {
-    const safePair = roles?.outline
-      ? decodeRolePairFromOutline(roles.outline)
-      : roles?.background
-        ? decodeRolePairFromBackground(roles.background)
-        : { ...this.globalRolePair };
-    const map = new Map(
-      Object.entries(mapping || {}).map(([key, value]) => [
-        normalizeHex(key, ""),
-        normalizeHex(value, null),
-      ]).filter(([, value]) => value),
-    );
-    const out = new Uint8ClampedArray(BUFFER_LEN);
-    for (let index = 0; index < CELL_COUNT; index += 1) {
-      const offset = index * 4;
-      const role = this.roleGrid[index];
-      let hex = safePair.background;
-      if (role === "o") {
-        hex = safePair.outline;
-      } else if (role === "c") {
-        const currentHex = normalizeHex(this.contentGrid[index], this.globalRolePair.outline);
-        hex = normalizeHex(map.get(currentHex) || currentHex, currentHex);
-      }
-      const rgb = hexToRgbLocal(hex);
-      out[offset] = rgb.r;
-      out[offset + 1] = rgb.g;
-      out[offset + 2] = rgb.b;
-      out[offset + 3] = 255;
-    }
-    return new ImageData(out, SIZE, SIZE);
+    return this.buildMappedImageDataForComposition({
+      roleGrid: this.roleGrid,
+      contentGrid: this.contentGrid,
+      globalRolePair: this.globalRolePair,
+    }, mapping, roles);
+  }
+
+  buildMappedImageDataForComposition(compositionState = {}, mapping = {}, roles = {}) {
+    return this._buildMappedImageDataForComposition({
+      roleGrid: compositionState?.roleGrid || this.roleGrid,
+      contentGrid: compositionState?.contentGrid || this.contentGrid,
+      globalRolePair: compositionState?.globalRolePair || this.globalRolePair,
+    }, mapping, roles);
   }
 
   _drawGrid(offsetX, offsetY, scaledSize) {
@@ -1204,6 +1262,7 @@ export class StudioCanvas {
       const dy = event.touches[0].clientY - event.touches[1].clientY;
       this._touchState = {
         active: true,
+        mode: "pinch",
         startDist: Math.sqrt((dx * dx) + (dy * dy)),
         startZoom: this.zoom,
         lastCenter: {
@@ -1218,6 +1277,13 @@ export class StudioCanvas {
     const touch = event.touches[0];
     const pixel = this.screenToPixel(touch.clientX, touch.clientY);
     if (!this._pixelInBounds(pixel.x, pixel.y)) return;
+    this._touchState = {
+      active: true,
+      mode: "draw",
+      startDist: 0,
+      startZoom: this.zoom,
+      lastCenter: null,
+    };
     if (this.activeTool === "paint" || this.activeTool === "brush" || this.activeTool === "noise-paint" || this.activeTool === "noise-erase") {
       this._pushUndo();
       this._strokePushed = true;
@@ -1225,12 +1291,21 @@ export class StudioCanvas {
       this._applyPaintToCell(pixel.x, pixel.y, this.activeTool);
       this._flattenComposition();
       this.render();
+      return;
+    }
+    if (this.activeTool === "fill") {
+      this.fillBlock(pixel.x, pixel.y);
+      return;
+    }
+    if (this.activeTool === "eyedropper") {
+      const hex = this.getPixelHex(pixel.x, pixel.y);
+      if (hex) this.onColorPick?.(hex);
     }
   }
 
   _onTouchMove(event) {
     if (!this._touchState.active || !this.loaded) return;
-    if (event.touches.length === 2) {
+    if (this._touchState.mode === "pinch" && event.touches.length === 2) {
       event.preventDefault();
       const dx = event.touches[0].clientX - event.touches[1].clientX;
       const dy = event.touches[0].clientY - event.touches[1].clientY;
@@ -1251,7 +1326,7 @@ export class StudioCanvas {
       this.render();
       return;
     }
-    if (event.touches.length === 1 && this._isPainting) {
+    if (this._touchState.mode === "draw" && event.touches.length === 1 && this._isPainting) {
       event.preventDefault();
       const touch = event.touches[0];
       const pixel = this.screenToPixel(touch.clientX, touch.clientY);
@@ -1265,7 +1340,7 @@ export class StudioCanvas {
 
   _onTouchEnd(event) {
     if (event.touches.length === 0) {
-      this._touchState = { active: false, startDist: 0, startZoom: 1, lastCenter: null };
+      this._touchState = { active: false, mode: null, startDist: 0, startZoom: 1, lastCenter: null };
       if (this._isPainting) {
         this._isPainting = false;
         this._strokePushed = false;
@@ -1398,21 +1473,7 @@ export class StudioCanvas {
   }
 
   _flattenComposition() {
-    for (let index = 0; index < CELL_COUNT; index += 1) {
-      const offset = index * 4;
-      let hex = this.globalRolePair.background;
-      const role = this.roleGrid[index];
-      if (role === "o") {
-        hex = this.globalRolePair.outline;
-      } else if (role === "c") {
-        hex = normalizeHex(this.contentGrid[index], this.globalRolePair.outline);
-      }
-      const rgb = hexToRgbLocal(hex);
-      this.buffer[offset] = rgb.r;
-      this.buffer[offset + 1] = rgb.g;
-      this.buffer[offset + 2] = rgb.b;
-      this.buffer[offset + 3] = 255;
-    }
+    this.buffer.set(this.exportCompositionImageData().data);
   }
 
   _invalidateCaches() {
@@ -1438,6 +1499,43 @@ export class StudioCanvas {
     this.display.removeEventListener("touchmove", this._onTouchMove);
     this.display.removeEventListener("touchend", this._onTouchEnd);
     this.display.removeEventListener("touchcancel", this._onTouchEnd);
+  }
+
+  _buildMappedImageDataForComposition(compositionState = {}, mapping = {}, roles = {}) {
+    const roleGrid = cloneRoleGrid(compositionState?.roleGrid);
+    const contentGrid = cloneContentGrid(compositionState?.contentGrid);
+    const basePair = compositionState?.globalRolePair?.background
+      ? decodeRolePairFromBackground(compositionState.globalRolePair.background)
+      : { ...this.globalRolePair };
+    const safePair = roles?.outline
+      ? decodeRolePairFromOutline(roles.outline)
+      : roles?.background
+        ? decodeRolePairFromBackground(roles.background)
+        : basePair;
+    const map = new Map(
+      Object.entries(mapping || {}).map(([key, value]) => [
+        normalizeHex(key, ""),
+        normalizeHex(value, null),
+      ]).filter(([, value]) => value),
+    );
+    const out = new Uint8ClampedArray(BUFFER_LEN);
+    for (let index = 0; index < CELL_COUNT; index += 1) {
+      const offset = index * 4;
+      const role = roleGrid[index];
+      let hex = safePair.background;
+      if (role === "o") {
+        hex = safePair.outline;
+      } else if (role === "c") {
+        const currentHex = normalizeHex(contentGrid[index], basePair.outline);
+        hex = normalizeHex(map.get(currentHex) || currentHex, currentHex);
+      }
+      const rgb = hexToRgbLocal(hex);
+      out[offset] = rgb.r;
+      out[offset + 1] = rgb.g;
+      out[offset + 2] = rgb.b;
+      out[offset + 3] = 255;
+    }
+    return new ImageData(out, SIZE, SIZE);
   }
 }
 

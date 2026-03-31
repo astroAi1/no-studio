@@ -489,7 +489,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     stageColorPreview: q("stage-color-preview"),
     stageColorInput: q("stage-color-input"),
     stageColorHex: q("stage-color-hex"),
-    stagePaintTargetRail: q("stage-paint-target-rail"),
+    stagePaintModeRail: q("stage-paint-mode-rail"),
+    stageRoleTargetRail: q("stage-role-target-rail"),
     startModeRail: q("start-mode-rail"),
     openDockColors: q("open-dock-colors"),
     dockScrim: q("dock-scrim"),
@@ -520,6 +521,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     surpriseBtn: q("surprise-btn"),
     heroNoMinimal: q("hero-no-minimal"),
     heroRolePair: q("hero-role-pair"),
+    paintModeRail: q("paint-mode-rail"),
     paintTargetRail: q("paint-target-rail"),
     showMask: q("show-mask"),
     clearMask: q("clear-mask"),
@@ -546,6 +548,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     exportGif: q("export-gif"),
     saveGalleryPng: q("save-gallery-png"),
     saveGalleryGif: q("save-gallery-gif"),
+    singleFrameRail: q("single-frame-rail"),
+    singleFrameToneRail: q("single-frame-tone-rail"),
     gallerySignature: q("gallery-signature"),
     openGalleryLink: q("open-gallery-link"),
     exportReset: q("export-reset"),
@@ -577,7 +581,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
     galleryMessage: "",
     galleryStorage: "sqlite",
     activeTool: "pointer",
+    paintMode: "create",
     activePaintTarget: "content",
+    lastRolePaintTarget: "background",
     activePresetTab: "mono",
     noMinimalDeltaMode: "exact",
     useActiveBg: false,
@@ -635,10 +641,16 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noFieldLastFamily: "chrome",
     popSheetLayout: "4x4",
     gridFrameTone: "cream",
+    singleFrameEnabled: false,
+    singleFrameTone: "black",
     popSheetStyle: POP_SHEET_STYLE_SOFT,
     popSheetBuildNonce: 0,
     lastPopSheetPanelSignatures: [],
     isSheetMode: false,
+    presentationMode: "single",
+    lastSingleCompositionSnapshot: null,
+    recentGridSeriesHistory: new Map(),
+    gridSeriesNonce: 0,
   };
 
   // ── Session persistence ──────────────────────────────────────
@@ -655,6 +667,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
         activePresetTab: state.activePresetTab,
         activeColor: state.activeColor,
         activeColorHex: state.activeColorHex,
+        paintMode: state.paintMode,
         noMinimalDeltaMode: state.noMinimalDeltaMode,
         useActiveBg: state.useActiveBg,
         activePaintTarget: state.activePaintTarget,
@@ -664,9 +677,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
         familyModifiers: state.familyModifiers,
         popSheetLayout: state.popSheetLayout,
         gridFrameTone: state.gridFrameTone,
+        singleFrameEnabled: state.singleFrameEnabled,
+        singleFrameTone: state.singleFrameTone,
         popSheetStyle: state.popSheetStyle,
         startMode: state.startMode,
         selectedFamily: state.activePresetTab,
+        presentationMode: state.presentationMode,
         gallerySignature: normalizeSignatureHandle(els.gallerySignature?.value || state.gallerySignature || ""),
         curatedPaletteMap: state.curatedPaletteMap,
         palettePins: state.palettePins,
@@ -751,11 +767,18 @@ export function mountNoStudioTool(root, shellApi = {}) {
     },
     onColorPick: (hex) => setActiveColorFromHex(hex),
     onChange: () => {
+      state.isSheetMode = canvas.hasSheet();
+      state.presentationMode = state.isSheetMode ? "sheet" : "single";
+      if (!state.isSheetMode) {
+        captureSingleCompositionSnapshot({ force: true });
+      }
       invalidateVariantRailState();
       updateUndoRedoButtons();
       updatePaletteGrid();
       renderHeroRolePair();
       renderNoiseTargetRail();
+      syncSingleFrameUi();
+      applySingleFrameState();
       updateExportButtons();
       persistSession();
     },
@@ -852,6 +875,173 @@ export function mountNoStudioTool(root, shellApi = {}) {
       JSON.stringify(state.familyModifiers[state.activePresetTab] || {}),
       canvas.getCurrentPalette().join(","),
     ].join(":");
+  }
+
+  function cloneCompositionStateLocal(compositionState) {
+    return {
+      globalRolePair: {
+        ...(compositionState?.globalRolePair || {}),
+      },
+      roleGrid: Array.isArray(compositionState?.roleGrid) ? compositionState.roleGrid.slice() : [],
+      contentGrid: Array.isArray(compositionState?.contentGrid) ? compositionState.contentGrid.slice() : [],
+      noiseMask: Array.isArray(compositionState?.noiseMask) ? compositionState.noiseMask.slice() : [],
+      noiseRoleTargets: compositionState?.noiseRoleTargets ? { ...compositionState.noiseRoleTargets } : {},
+    };
+  }
+
+  function hashImageDataSignature(imageData) {
+    const data = imageData?.data || [];
+    let hash = 2166136261;
+    for (let index = 0; index < data.length; index += 4) {
+      hash ^= data[index];
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 1];
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 2];
+      hash = Math.imul(hash, 16777619);
+      hash ^= data[index + 3];
+      hash = Math.imul(hash, 16777619);
+    }
+    return String(hash >>> 0);
+  }
+
+  function captureSingleCompositionSnapshot({ force = false } = {}) {
+    if (!state.selected) return null;
+    if (!force && canvas.hasSheet()) {
+      return state.lastSingleCompositionSnapshot;
+    }
+    const compositionState = canvas.exportCompositionState();
+    const imageData = canvas.exportCompositionImageData();
+    const rolePair = canvas.getGlobalRolePair();
+    const palette = normalizeHexPalette(canvas.getCompositionPalette());
+    const classified = currentCreativeClassification().map((entry) => ({ ...entry }));
+    const baseCanvasOutputSignature = [
+      hashImageDataSignature(imageData),
+      rolePair.background,
+      rolePair.outline,
+      makePaletteSignature(palette),
+      state.startMode,
+    ].join(":");
+    state.lastSingleCompositionSnapshot = {
+      tokenId: Number(state.selected?.id) || 0,
+      compositionState: cloneCompositionStateLocal(compositionState),
+      imageData: cloneImageDataLocal(imageData),
+      rolePair: {
+        background: rolePair.background,
+        outline: rolePair.outline,
+      },
+      palette,
+      classified,
+      baseCanvasOutputSignature,
+    };
+    state.presentationMode = "single";
+    return state.lastSingleCompositionSnapshot;
+  }
+
+  function activeSingleCompositionSnapshot() {
+    return state.lastSingleCompositionSnapshot || captureSingleCompositionSnapshot({ force: true });
+  }
+
+  function gridSeriesHistoryKey(snapshot, family, layoutId) {
+    return [
+      String(snapshot?.baseCanvasOutputSignature || "none"),
+      String(family || activeCreativeFamily()),
+      String(layoutId || state.popSheetLayout || "4x4"),
+    ].join(":");
+  }
+
+  function recentGridSeriesHistoryForKey(key) {
+    return Array.isArray(state.recentGridSeriesHistory.get(key))
+      ? state.recentGridSeriesHistory.get(key)
+      : [];
+  }
+
+  function buildGridSeriesRecord({ family, layoutId, panelResults, snapshot }) {
+    const orderedPanelSignatures = panelResults.map((entry) => (
+      panelVisualSignature(entry.variant, { style: `grid-${family}`, layout: layoutId })
+    ));
+    const orderedRolePairSignatures = panelResults.map((entry) => panelRolePairSignature(entry.variant));
+    const orderedBackgroundHexes = panelResults.map((entry) => String(entry?.variant?.roles?.background || "").toUpperCase());
+    return {
+      family,
+      layoutId,
+      baseCanvasOutputSignature: String(snapshot?.baseCanvasOutputSignature || ""),
+      orderedPanelSignatures,
+      orderedRolePairSignatures,
+      orderedBackgroundHexes,
+      fullSeriesSignature: [
+        String(snapshot?.baseCanvasOutputSignature || ""),
+        String(family || ""),
+        String(layoutId || ""),
+        orderedPanelSignatures.join("||"),
+        orderedRolePairSignatures.join("||"),
+        orderedBackgroundHexes.join("||"),
+      ].join("::"),
+    };
+  }
+
+  function gridSeriesOverlapCount(candidate, prior) {
+    const candidatePanels = Array.isArray(candidate?.orderedPanelSignatures) ? candidate.orderedPanelSignatures : [];
+    const priorPanels = new Set(Array.isArray(prior?.orderedPanelSignatures) ? prior.orderedPanelSignatures : []);
+    let overlap = 0;
+    for (const value of candidatePanels) {
+      if (priorPanels.has(value)) overlap += 1;
+    }
+    return overlap;
+  }
+
+  function isGridSeriesNovel(candidateRecord, history) {
+    if (!candidateRecord?.fullSeriesSignature) return false;
+    const panelCount = Math.max(1, candidateRecord.orderedPanelSignatures.length);
+    for (const entry of history) {
+      if (!entry) continue;
+      if (entry.fullSeriesSignature === candidateRecord.fullSeriesSignature) {
+        return false;
+      }
+      const overlap = gridSeriesOverlapCount(candidateRecord, entry);
+      const sameRolePairs = (
+        Array.isArray(entry.orderedRolePairSignatures)
+        && entry.orderedRolePairSignatures.join("||") === candidateRecord.orderedRolePairSignatures.join("||")
+      );
+      if (sameRolePairs && overlap >= Math.max(2, panelCount - 1)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function scoreGridSeriesCandidate(candidateRecord, history) {
+    if (!isGridSeriesNovel(candidateRecord, history)) return Number.NEGATIVE_INFINITY;
+    const uniquePanels = new Set(candidateRecord.orderedPanelSignatures.filter(Boolean)).size;
+    const uniquePairs = new Set(candidateRecord.orderedRolePairSignatures.filter(Boolean)).size;
+    const uniqueBackgrounds = new Set(candidateRecord.orderedBackgroundHexes.filter(Boolean)).size;
+    let minBackgroundDistance = 0.42;
+    let maxOverlapRatio = 0;
+    for (const prior of history) {
+      if (!prior) continue;
+      const overlap = gridSeriesOverlapCount(candidateRecord, prior);
+      maxOverlapRatio = Math.max(maxOverlapRatio, overlap / Math.max(1, candidateRecord.orderedPanelSignatures.length));
+      for (const backgroundHex of candidateRecord.orderedBackgroundHexes) {
+        for (const priorBackground of prior.orderedBackgroundHexes || []) {
+          if (!/^#[0-9A-F]{6}$/.test(backgroundHex) || !/^#[0-9A-F]{6}$/.test(priorBackground)) continue;
+          minBackgroundDistance = Math.min(minBackgroundDistance, oklabDistance(backgroundHex, priorBackground));
+        }
+      }
+    }
+    return (
+      (uniquePanels * 18)
+      + (uniquePairs * 12)
+      + (uniqueBackgrounds * 9)
+      + (minBackgroundDistance * 180)
+      + ((1 - maxOverlapRatio) * 48)
+    );
+  }
+
+  function rememberRecentGridSeries(historyKey, record) {
+    const current = recentGridSeriesHistoryForKey(historyKey).filter((entry) => entry?.fullSeriesSignature !== record?.fullSeriesSignature);
+    current.unshift(record);
+    if (current.length > 32) current.length = 32;
+    state.recentGridSeriesHistory.set(historyKey, current);
   }
 
   function makeVariantSessionSignature(family, preset) {
@@ -987,7 +1177,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   syncColorUI();
   canvas.setActiveColorHex(state.activeColorHex);
-  canvas.setPaintTarget(state.activePaintTarget);
+  applySingleFrameState();
+  setPaintMode(state.paintMode, { quiet: true });
 
   function clampPercent(value) {
     return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
@@ -1125,8 +1316,73 @@ export function mountNoStudioTool(root, shellApi = {}) {
     });
   }
 
+  function renderPaintModeRails() {
+    const createMode = state.paintMode !== "role";
+    const modeRails = [els.paintModeRail, els.stagePaintModeRail].filter(Boolean);
+    modeRails.forEach((rail) => {
+      rail.querySelectorAll("[data-paint-mode]").forEach((btn) => {
+        btn.classList.toggle("is-active", btn.dataset.paintMode === state.paintMode);
+      });
+    });
+
+    const targetRails = [els.paintTargetRail, els.stageRoleTargetRail].filter(Boolean);
+    targetRails.forEach((rail) => {
+      rail.hidden = createMode;
+      rail.querySelectorAll("[data-paint-target]").forEach((btn) => {
+        btn.classList.toggle("is-active", btn.dataset.paintTarget === state.activePaintTarget);
+      });
+    });
+  }
+
+  function currentSingleFrameStyle() {
+    return GRID_FRAME_TONES[state.singleFrameTone] || GRID_FRAME_TONES.black;
+  }
+
+  function syncSingleFrameUi() {
+    if (els.singleFrameRail) {
+      els.singleFrameRail.querySelectorAll("[data-single-frame]").forEach((btn) => {
+        const isOn = btn.dataset.singleFrame === "on";
+        btn.classList.toggle("is-active", state.singleFrameEnabled === isOn);
+      });
+    }
+    if (els.singleFrameToneRail) {
+      els.singleFrameToneRail.querySelectorAll("[data-single-frame-tone]").forEach((btn) => {
+        const isActive = btn.dataset.singleFrameTone === state.singleFrameTone;
+        btn.classList.toggle("is-active", isActive);
+        btn.disabled = !state.singleFrameEnabled;
+      });
+    }
+  }
+
+  function applySingleFrameState() {
+    canvas.setSingleFrame({
+      enabled: state.singleFrameEnabled && !state.isSheetMode,
+      style: currentSingleFrameStyle(),
+    });
+  }
+
+  function setPaintMode(mode = "create", { quiet = false } = {}) {
+    const nextMode = mode === "role" ? "role" : "create";
+    state.paintMode = nextMode;
+    if (nextMode === "create") {
+      state.activePaintTarget = "content";
+    } else if (!["background", "outline", "erase"].includes(state.activePaintTarget)) {
+      state.activePaintTarget = state.lastRolePaintTarget || "background";
+    }
+    if (["background", "outline", "erase"].includes(state.activePaintTarget)) {
+      state.lastRolePaintTarget = state.activePaintTarget;
+    }
+    canvas.setPaintTarget(state.activePaintTarget);
+    renderPaintModeRails();
+    renderHeroRolePair();
+    if (!quiet) {
+      setTopbarStatus(nextMode === "create" ? "Create mode · brush and fill paint content" : `Role mode · ${state.activePaintTarget}`);
+      persistSession();
+    }
+  }
+
   function renderPaintTargetRail() {
-    const rails = [els.paintTargetRail, els.stagePaintTargetRail].filter(Boolean);
+    const rails = [els.paintTargetRail, els.stageRoleTargetRail].filter(Boolean);
     rails.forEach((rail) => {
       rail.querySelectorAll("[data-paint-target]").forEach((btn) => {
         btn.classList.toggle("is-active", btn.dataset.paintTarget === state.activePaintTarget);
@@ -1174,9 +1430,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
   syncActiveBgToggle();
   renderHeroRolePair();
   renderNoMinimalModeRail();
-  renderPaintTargetRail();
+  renderPaintModeRails();
   renderNoiseTargetRail();
   renderStartModeRail();
+  syncSingleFrameUi();
   syncMaskUi();
 
   els.noMinimalModeRail?.addEventListener("click", (event) => {
@@ -1191,26 +1448,63 @@ export function mountNoStudioTool(root, shellApi = {}) {
     setTopbarStatus(`No-Minimalism ${state.noMinimalDeltaMode} twin · world armed`);
   });
 
+  const paintModeHandler = (event) => {
+    const button = event.target.closest("[data-paint-mode]");
+    if (!button) return;
+    setPaintMode(button.dataset.paintMode || "create");
+  };
+
+  els.paintModeRail?.addEventListener("click", paintModeHandler);
+  els.stagePaintModeRail?.addEventListener("click", paintModeHandler);
+
   els.paintTargetRail?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-paint-target]");
     if (!button) return;
-    state.activePaintTarget = button.dataset.paintTarget || "content";
+    state.activePaintTarget = button.dataset.paintTarget || "background";
+    state.lastRolePaintTarget = state.activePaintTarget;
     canvas.setPaintTarget(state.activePaintTarget);
-    renderPaintTargetRail();
+    renderPaintModeRails();
     renderHeroRolePair();
     setTopbarStatus(`Paint target ${state.activePaintTarget}`);
     persistSession();
   });
 
-  els.stagePaintTargetRail?.addEventListener("click", (event) => {
+  els.stageRoleTargetRail?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-paint-target]");
     if (!button) return;
-    state.activePaintTarget = button.dataset.paintTarget || "content";
+    state.activePaintTarget = button.dataset.paintTarget || "background";
+    state.lastRolePaintTarget = state.activePaintTarget;
     canvas.setPaintTarget(state.activePaintTarget);
-    renderPaintTargetRail();
+    renderPaintModeRails();
     renderHeroRolePair();
     setTopbarStatus(`Paint target ${state.activePaintTarget}`);
     persistSession();
+  });
+
+  els.singleFrameRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-single-frame]");
+    if (!button) return;
+    state.singleFrameEnabled = button.dataset.singleFrame === "on";
+    syncSingleFrameUi();
+    applySingleFrameState();
+    setTopbarStatus(state.singleFrameEnabled ? `Single frame ${currentSingleFrameStyle().label || "armed"}` : "Single frame off");
+    persistSession();
+  });
+
+  els.singleFrameToneRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-single-frame-tone]");
+    if (!button) return;
+    const nextTone = button.dataset.singleFrameTone || "black";
+    state.singleFrameTone = GRID_FRAME_TONES[nextTone] ? nextTone : "black";
+    syncSingleFrameUi();
+    applySingleFrameState();
+    setTopbarStatus(`Single frame ${GRID_FRAME_TONES[state.singleFrameTone].label} armed`);
+    persistSession();
+  });
+
+  els.openDockColors?.addEventListener("click", () => {
+    setSidebarOpen(true);
+    els.colorSection?.scrollIntoView({ block: "start", behavior: "smooth" });
   });
 
   function applyStartMode(mode = state.startMode, { quiet = false } = {}) {
@@ -2158,6 +2452,13 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     if (els.galleryRefresh) els.galleryRefresh.disabled = state.galleryLoading;
+    if (state.galleryStorage === "unavailable" && !state.galleryLoading) {
+      const message = state.galleryMessage || (state.globalGalleryEnabled
+        ? "Shared No-Gallery is unavailable right now."
+        : "Shared No-Gallery is not configured for this deployment.");
+      els.galleryList.innerHTML = `<div class="gallery-empty">${escapeHtml(message)}</div>`;
+      return;
+    }
     if (state.galleryMessage) {
       els.galleryList.innerHTML = `<div class="gallery-empty">${escapeHtml(state.galleryMessage)}</div>`;
       return;
@@ -2167,13 +2468,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     if (!state.galleryItems.length) {
-      els.galleryList.innerHTML = `<div class="gallery-empty">${state.galleryStorage === "sqlite" ? "No compositions saved yet." : "Local-only gallery is empty."}</div>`;
+      els.galleryList.innerHTML = `<div class="gallery-empty">No compositions saved yet.</div>`;
       return;
     }
-    const storageNotice = state.galleryStorage === "sqlite"
-      ? ""
-      : `<div class="gallery-empty">Local-only fallback. These saves are only visible in this browser.</div>`;
-    els.galleryList.innerHTML = `${storageNotice}${state.galleryItems.map((item) => {
+    els.galleryList.innerHTML = `${state.galleryItems.map((item) => {
       const bg = item.rolePair?.background || "";
       const fg = item.rolePair?.figure || "";
       const mediaType = String(item.mediaType || "").toLowerCase() === "gif" ? "gif" : "png";
@@ -2189,7 +2487,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
       const signatureLine = signatureResolved
         ? `<span class="gallery-subline gallery-signature">${escapeHtml(signatureResolved)}</span>`
         : "";
-      const voteLine = `<button class="gallery-refresh gallery-vote-inline${item?.viewerHasVoted ? " is-active" : ""}" type="button" data-gallery-vote="${escapeHtml(item.id || "")}" ${item?.viewerHasVoted || state.galleryStorage !== "sqlite" ? "disabled" : ""}>▲ ${Number(item?.voteCount) || 0}${item?.viewerHasVoted ? " · voted" : ""}</button>`;
+      const voteLine = `<div class="no-gallery-reactions">
+        <button class="no-gallery-react-btn${item?.viewerReaction === "no" ? " is-active" : ""}" type="button" data-gallery-react="${escapeHtml(item.id || "")}" data-gallery-reaction="no" ${state.galleryStorage !== "sqlite" ? "disabled" : ""}>NO ${Number(item?.noCount ?? item?.voteCount) || 0}</button>
+        <button class="no-gallery-react-btn${item?.viewerReaction === "yes" ? " is-active" : ""}" type="button" data-gallery-react="${escapeHtml(item.id || "")}" data-gallery-reaction="yes" ${state.galleryStorage !== "sqlite" ? "disabled" : ""}>YES ${Number(item?.yesCount) || 0}</button>
+      </div>`;
       const paletteLine = palettePreview.length
         ? `<span class="gallery-palette-strip">${palettePreview.map((hex) => `<span class="gallery-palette-chip" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)}"></span>`).join("")}${palette.length > palettePreview.length ? `<span class="gallery-palette-count">+${palette.length - palettePreview.length}</span>` : ""}</span>`
         : "";
@@ -2224,10 +2525,17 @@ export function mountNoStudioTool(root, shellApi = {}) {
       state.galleryItems = Array.isArray(payload.items) ? payload.items : [];
       state.galleryStorage = String(payload?.storage || "sqlite");
       invalidateVariantRailState();
-      state.galleryMessage = "";
-      if (!silent) setTopbarStatus(`No-Gallery · ${state.galleryItems.length} saved`);
+      state.galleryMessage = payload?.unavailable
+        ? String(payload?.message || "Shared No-Gallery is unavailable right now.")
+        : "";
+      if (!silent) {
+        setTopbarStatus(payload?.unavailable
+          ? state.galleryMessage
+          : `No-Gallery · ${state.galleryItems.length} saved`);
+      }
     } catch (error) {
       state.galleryItems = [];
+      state.galleryStorage = "unavailable";
       state.galleryMessage = error.message || "No-Gallery unavailable";
       if (!silent) setTopbarStatus(state.galleryMessage);
     } finally {
@@ -2273,6 +2581,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!state.selected || state.gallerySaving) return;
     if (!state.noGalleryAvailable) {
       setTopbarStatus("No-Gallery is unavailable for this deployment");
+      return;
+    }
+    if (!state.globalGalleryEnabled || state.galleryStorage === "unavailable") {
+      setTopbarStatus("Shared No-Gallery is unavailable");
       return;
     }
     if (mediaKind !== "png" && mediaKind !== "gif") {
@@ -2323,6 +2635,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
         contentGrid: composition.contentGrid,
         noiseMask: composition.noiseMask,
         noiseRoleTargets: composition.noiseRoleTargets,
+        presentationMode: state.presentationMode,
+        singleFrameEnabled: state.singleFrameEnabled,
+        singleFrameTone: state.singleFrameTone,
         outputSignature,
       };
       const payload = await saveNoStudioGallery({
@@ -2352,15 +2667,10 @@ export function mountNoStudioTool(root, shellApi = {}) {
       }
       state.galleryMessage = "";
       renderGallery();
-      const savedLocally = state.galleryStorage !== "sqlite";
       if (payload?.deduped) {
-        setTopbarStatus(savedLocally
-          ? `Already saved locally · ${mediaKind.toUpperCase()}`
-          : `Already in No-Gallery · ${mediaKind.toUpperCase()}`);
+        setTopbarStatus(`Already in No-Gallery · ${mediaKind.toUpperCase()}`);
       } else {
-        setTopbarStatus(savedLocally
-          ? `Saved ${mediaKind.toUpperCase()} locally · browser-only`
-          : `Saved ${mediaKind.toUpperCase()} to No-Gallery`);
+        setTopbarStatus(`Saved ${mediaKind.toUpperCase()} to No-Gallery`);
       }
     } catch (error) {
       setTopbarStatus(error.message || "Save to No-Gallery failed");
@@ -2598,15 +2908,18 @@ export function mountNoStudioTool(root, shellApi = {}) {
     posterize = false,
     attempt = 0,
     sheetNonce = 0,
+    classified = null,
+    baseBackgroundHex = null,
   }) {
     const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
-    const classified = currentCreativeClassification();
+    const effectiveClassified = Array.isArray(classified) && classified.length
+      ? classified
+      : currentCreativeClassification();
     const style = pickGridPanelStyle(safeFamily, panelIndex, attempt, sheetNonce);
-    const basePair = canvas.getGlobalRolePair();
-    const preset = createUniqueVariant(safeFamily, classified);
+    const preset = createUniqueVariant(safeFamily, effectiveClassified);
     const backgroundHex = computeGridPanelBackground({
       family: safeFamily,
-      baseBackgroundHex: basePair.background,
+      baseBackgroundHex: baseBackgroundHex || canvas.getGlobalRolePair().background,
       panelIndex,
       panelCount,
       attempt,
@@ -2614,7 +2927,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       style,
       posterize,
     });
-    const seeded = buildFamilyResult(classified, safeFamily, {
+    const seeded = buildFamilyResult(effectiveClassified, safeFamily, {
       preset,
       backgroundHex,
       traitPhase: ((panelIndex + 1) * 0.37) + (attempt * 0.23) + (sheetNonce * 0.11),
@@ -2622,7 +2935,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       panelCount: Math.max(2, panelCount * 2),
       popSheetStyle: posterize ? POP_SHEET_STYLE_POSTER : POP_SHEET_STYLE_SOFT,
     });
-    const tuned = tuneGridPanelResult(seeded, classified, {
+    const tuned = tuneGridPanelResult(seeded, effectiveClassified, {
       family: safeFamily,
       panelIndex,
       panelCount,
@@ -2921,79 +3234,114 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     const { cols, rows, label } = getPopSheetSpec(layoutId);
     const panelCount = cols * rows;
     const familyLabel = FAMILY_LABELS[family] || "Studio";
-    const sheetNonce = (Number(state.popSheetBuildNonce) || 0) + 1;
-    state.popSheetBuildNonce = sheetNonce;
-    const compositionState = canvas.exportCompositionState();
-    const baseTile = canvas.exportCompositionImageData();
-    const usedRolePairs = new Set();
-    const usedPaletteSignatures = new Set();
-    const usedPanelSignatures = new Set();
-    const usedBackgrounds = [];
-    const minimumBgDistance = family === "pastel" ? 0.045 : family === "mono" ? 0.038 : 0.055;
-
-    function acceptGridPanel(result, tile, panelIndex, attempt) {
-      const rolePair = panelRolePairSignature(result);
-      const paletteSig = makePanelPaletteSignature(result);
-      const visualSig = panelVisualSignature(result, {
-        style: `grid-${family}`,
-        layout: layoutId,
-      });
-      const panelSig = panelSignature(result, {
-        style: `grid-${family}`,
-        layout: layoutId,
-        panelSeed: panelIndex + (attempt * panelCount) + (sheetNonce * 997),
-      });
-      const backgroundHex = String(result?.roles?.background || "").toUpperCase();
-      if (!rolePair || !paletteSig || !visualSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
-      if (!tileKeepsArtworkVisible(tile, compositionState.roleGrid)) return false;
-      if (usedRolePairs.has(rolePair)) return false;
-      if (usedPaletteSignatures.has(paletteSig)) return false;
-      if (usedPanelSignatures.has(panelSig)) return false;
-      if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
-      usedRolePairs.add(rolePair);
-      usedPaletteSignatures.add(paletteSig);
-      usedPanelSignatures.add(panelSig);
-      usedBackgrounds.push(backgroundHex);
-      return true;
+    const snapshot = activeSingleCompositionSnapshot();
+    if (!snapshot?.compositionState || !snapshot?.imageData) {
+      setTopbarStatus("Grid build needs a live single composition first");
+      return;
     }
+    const compositionState = snapshot.compositionState;
+    const baseTile = cloneImageDataLocal(snapshot.imageData);
+    const minimumBgDistance = family === "pastel" ? 0.045 : family === "mono" ? 0.038 : 0.055;
+    const historyKey = gridSeriesHistoryKey(snapshot, family, layoutId);
+    const history = recentGridSeriesHistoryForKey(historyKey);
+    const candidateCount = 28;
 
-    function buildGridPanel(panelIndex) {
-      const maxAttempts = 12;
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        const variant = buildHarmonicGridVariant({
-          family,
-          panelIndex,
-          panelCount,
-          attempt,
-          sheetNonce,
+    function buildSeriesCandidate(candidateIndex) {
+      const usedRolePairs = new Set();
+      const usedPaletteSignatures = new Set();
+      const usedPanelSignatures = new Set();
+      const usedBackgrounds = [];
+      const sheetNonce = (Number(state.gridSeriesNonce) || 0) + 1 + candidateIndex;
+      const panelResults = [];
+
+      function acceptGridPanel(result, tile, panelIndex, attempt) {
+        const rolePair = panelRolePairSignature(result);
+        const paletteSig = makePanelPaletteSignature(result);
+        const visualSig = panelVisualSignature(result, {
+          style: `grid-${family}`,
+          layout: layoutId,
         });
-        const tile = canvas.buildMappedImageData(variant.mapping, variant.roles);
-        if (!acceptGridPanel(variant, tile, panelIndex, attempt)) continue;
-        return {
-          variant,
-          tile,
-        };
+        const panelSig = panelSignature(result, {
+          style: `grid-${family}`,
+          layout: layoutId,
+          panelSeed: panelIndex + (attempt * panelCount) + (sheetNonce * 997),
+        });
+        const backgroundHex = String(result?.roles?.background || "").toUpperCase();
+        if (!rolePair || !paletteSig || !visualSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
+        if (!tileKeepsArtworkVisible(tile, compositionState.roleGrid)) return false;
+        if (usedRolePairs.has(rolePair)) return false;
+        if (usedPaletteSignatures.has(paletteSig)) return false;
+        if (usedPanelSignatures.has(panelSig)) return false;
+        if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
+        usedRolePairs.add(rolePair);
+        usedPaletteSignatures.add(paletteSig);
+        usedPanelSignatures.add(panelSig);
+        usedBackgrounds.push(backgroundHex);
+        return true;
       }
 
-      const fallback = buildHarmonicGridVariant({
+      for (let panelIndex = 0; panelIndex < panelCount; panelIndex += 1) {
+        let accepted = null;
+        const maxAttempts = 14;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          const variant = buildHarmonicGridVariant({
+            family,
+            panelIndex,
+            panelCount,
+            attempt: attempt + (candidateIndex * 2),
+            sheetNonce: sheetNonce + (candidateIndex * 7),
+            classified: snapshot.classified,
+            baseBackgroundHex: snapshot.rolePair.background,
+          });
+          const tile = canvas.buildMappedImageDataForComposition(compositionState, variant.mapping, variant.roles);
+          if (!acceptGridPanel(variant, tile, panelIndex, attempt)) continue;
+          accepted = { variant, tile };
+          break;
+        }
+        if (!accepted) {
+          const fallback = buildHarmonicGridVariant({
+            family,
+            panelIndex,
+            panelCount,
+            attempt: 99 + panelIndex + (candidateIndex * 9),
+            sheetNonce: sheetNonce + (candidateIndex * 11),
+            classified: snapshot.classified,
+            baseBackgroundHex: snapshot.rolePair.background,
+          });
+          const fallbackTile = canvas.buildMappedImageDataForComposition(compositionState, fallback.mapping, fallback.roles);
+          accepted = {
+            variant: fallback,
+            tile: tileKeepsArtworkVisible(fallbackTile, compositionState.roleGrid)
+              ? fallbackTile
+              : cloneImageDataLocal(baseTile),
+          };
+        }
+        panelResults.push(accepted);
+      }
+
+      const record = buildGridSeriesRecord({
         family,
-        panelIndex,
-        panelCount,
-        attempt: 99 + panelIndex,
-        sheetNonce,
+        layoutId,
+        panelResults,
+        snapshot,
       });
-      const fallbackTile = canvas.buildMappedImageData(fallback.mapping, fallback.roles);
       return {
-        variant: fallback,
-        tile: tileKeepsArtworkVisible(fallbackTile, compositionState.roleGrid)
-          ? fallbackTile
-          : cloneImageDataLocal(baseTile),
+        sheetNonce,
+        panelResults,
+        variants: panelResults.map((entry) => entry.variant).filter(Boolean),
+        tiles: panelResults.map((entry) => entry.tile || cloneImageDataLocal(baseTile)),
+        record,
+        score: scoreGridSeriesCandidate(record, history),
       };
     }
 
-    const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => buildGridPanel(panelIndex));
-    const variants = panelResults.map((entry) => entry.variant).filter(Boolean);
-    const tiles = panelResults.map((entry) => entry.tile || cloneImageDataLocal(baseTile));
+    const candidates = Array.from({ length: candidateCount }, (_, index) => buildSeriesCandidate(index))
+      .filter((candidate) => Number.isFinite(candidate.score));
+    const selectedSeries = candidates.sort((a, b) => b.score - a.score)[0] || buildSeriesCandidate(candidateCount + 5);
+    const variants = selectedSeries.variants;
+    const tiles = selectedSeries.tiles;
+    const record = selectedSeries.record;
+    state.gridSeriesNonce = selectedSeries.sheetNonce;
 
     if (variants[0]) {
       state.variantByFamily[family] = variants[0];
@@ -3013,14 +3361,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
     state.noFieldLastFamily = family;
     state.isSheetMode = true;
+    state.presentationMode = "sheet";
     state.lastReductionMode = "grid";
-    state.lastPopSheetPanelSignatures = variants.map((variant) => (
-      panelVisualSignature(variant, { style: `grid-${family}`, layout: layoutId })
-    ));
+    state.lastPopSheetPanelSignatures = record.orderedPanelSignatures.slice();
+    rememberRecentGridSeries(historyKey, record);
     canvas.setSheetTiles(tiles, cols, rows, currentGridFrameStyle());
     renderVariantPanel();
     updatePaletteGrid();
-    setTopbarStatus(`${familyLabel} grid · ${label} · unique live canvas series`);
+    setTopbarStatus(`${familyLabel} grid · ${label} · fresh series locked`);
     pulseStudio("variant");
   }
 
@@ -3028,9 +3376,10 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     if (!state.selected) return;
 
     const { cols, rows, label } = getPopSheetSpec(layoutId);
-    const classified = currentCreativeClassification();
-    const compositionState = canvas.exportCompositionState();
-    const baseTile = canvas.exportCompositionImageData();
+    const snapshot = activeSingleCompositionSnapshot();
+    const classified = snapshot?.classified || currentCreativeClassification();
+    const compositionState = snapshot?.compositionState || canvas.exportCompositionState();
+    const baseTile = snapshot?.imageData ? cloneImageDataLocal(snapshot.imageData) : canvas.exportCompositionImageData();
     const panelCount = cols * rows;
     const popStyle = normalizePopSheetStyle(styleId);
     const sheetNonce = (Number(state.popSheetBuildNonce) || 0) + 1;
@@ -3054,10 +3403,12 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
           panelIndex,
           panelCount,
           posterize: true,
+          classified,
+          baseBackgroundHex: snapshot?.rolePair?.background || canvas.getGlobalRolePair().background,
         })
       ));
       const tiles = panelResults.map((panel) => {
-        const tile = canvas.buildMappedImageData(panel.mapping, panel.roles);
+        const tile = canvas.buildMappedImageDataForComposition(compositionState, panel.mapping, panel.roles);
         return tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile);
       });
       state.variantByFamily.warhol = {
@@ -3077,6 +3428,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       state.activeStudioProvenance = null;
       state.noFieldLastFamily = "warhol";
       state.isSheetMode = true;
+      state.presentationMode = "sheet";
       state.lastReductionMode = "pop-sheet";
       state.lastPopSheetPanelSignatures = panelResults.map((panel) => (
         panelVisualSignature(panel, { style: popStyle, layout: layoutId })
@@ -3228,7 +3580,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
 
     const tiles = panelResults.map((panel, panelIndex) => {
-      const tile = canvas.buildMappedImageData(Object.fromEntries(panel.mapping || []), panel.roles);
+      const tile = canvas.buildMappedImageDataForComposition(compositionState, Object.fromEntries(panel.mapping || []), panel.roles);
       if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
         for (let index = 0; index < compositionState.roleGrid.length; index += 1) {
           if (compositionState.roleGrid[index] !== "c") continue;
@@ -3263,6 +3615,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.activeStudioProvenance = null;
     state.noFieldLastFamily = "warhol";
     state.isSheetMode = true;
+    state.presentationMode = "sheet";
     state.lastReductionMode = "pop-sheet";
     state.lastPopSheetPanelSignatures = panelResults.map((panel) => (
       panelVisualSignature(panel, { style: popStyle, layout: layoutId })
@@ -3786,13 +4139,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     const ok = state.selected != null;
     const grain = canvas.getDisplayGrain();
     const hasNoiseMask = canvas.getNoiseMaskCoordinates().length > 0;
+    const sharedGalleryReady = state.noGalleryAvailable && state.globalGalleryEnabled && state.galleryStorage !== "unavailable";
     els.exportPng.disabled = !ok;
     els.exportGif.disabled = !ok || !grain.enabled || !(grain.amount > 0) || !hasNoiseMask;
     if (els.saveGalleryPng) {
-      els.saveGalleryPng.disabled = !ok || state.gallerySaving;
+      els.saveGalleryPng.disabled = !ok || state.gallerySaving || !sharedGalleryReady;
     }
     if (els.saveGalleryGif) {
-      els.saveGalleryGif.disabled = !ok || state.gallerySaving || !grain.enabled || !(grain.amount > 0) || !hasNoiseMask;
+      els.saveGalleryGif.disabled = !ok || state.gallerySaving || !grain.enabled || !(grain.amount > 0) || !hasNoiseMask || !sharedGalleryReady;
     }
     els.exportReset.disabled = !ok;
   }
@@ -3874,9 +4228,9 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
     try {
       const fileName = `nopunk-${state.selected.id}-no-studio-noise.gif`;
-      if (state.noiseGifAvailable && !canvas.hasSheet()) {
+      if (state.noiseGifAvailable && !canvas.hasSheet() && !state.singleFrameEnabled) {
         try {
-          const imageData = canvas.exportImageData();
+          const imageData = canvas.exportCompositionImageData();
           const rgba24B64 = encodeRgba24B64(imageData.data);
           const noiseMask = canvas.getNoiseMaskCoordinates();
           const payload = await renderNoStudioNoiseGif({
@@ -3940,13 +4294,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
   });
 
   els.galleryList?.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-gallery-vote]");
+    const button = event.target.closest("[data-gallery-react][data-gallery-reaction]");
     if (!button) return;
     event.preventDefault();
-    const id = String(button.getAttribute("data-gallery-vote") || "");
+    const id = String(button.getAttribute("data-gallery-react") || "");
+    const reaction = String(button.getAttribute("data-gallery-reaction") || "no");
     if (!id) return;
     try {
-      const payload = await voteNoStudioGallery(id);
+      const payload = await voteNoStudioGallery(id, reaction);
       if (!payload?.item) return;
       state.galleryItems = state.galleryItems.map((entry) => String(entry?.id || "") === String(payload.item.id)
         ? { ...entry, ...payload.item }
@@ -4057,6 +4412,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       state.originalRoleMap = classifyPixelRoles(imageData);
       state.originalOccupied = getOccupiedPixels(imageData);
       canvas.loadImageData(imageData);
+      applySingleFrameState();
       const restoredCanvasSession = restoreSessionArmed
         && pendingCanvasSession
         && Number(pendingCanvasSession.selectedTokenId) === Number(state.selected.id);
@@ -4087,6 +4443,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       if (!restoredCanvasSession && state.startMode !== "full") {
         applyStartMode(state.startMode, { quiet: true });
       }
+      captureSingleCompositionSnapshot({ force: true });
       refreshNoMinimalPreviewPair();
       renderHeroRolePair();
       renderNoiseTargetRail();
@@ -4112,9 +4469,13 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
     if (savedSession.activeColor) state.activeColor = savedSession.activeColor;
     if (savedSession.activeColorHex) state.activeColorHex = savedSession.activeColorHex;
+    if (savedSession.paintMode === "role") state.paintMode = "role";
     if (savedSession.noMinimalDeltaMode) state.noMinimalDeltaMode = savedSession.noMinimalDeltaMode;
     if (savedSession.useActiveBg != null) state.useActiveBg = Boolean(savedSession.useActiveBg);
     if (savedSession.activePaintTarget) state.activePaintTarget = savedSession.activePaintTarget;
+    if (["background", "outline", "erase"].includes(state.activePaintTarget)) {
+      state.lastRolePaintTarget = state.activePaintTarget;
+    }
     if (savedSession.globalModifiers && typeof savedSession.globalModifiers === "object") {
       state.globalModifiers = {
         ...state.globalModifiers,
@@ -4140,6 +4501,12 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
     if (savedSession.gridFrameTone && GRID_FRAME_TONES[savedSession.gridFrameTone]) {
       state.gridFrameTone = savedSession.gridFrameTone;
+    }
+    if (savedSession.singleFrameEnabled != null) {
+      state.singleFrameEnabled = Boolean(savedSession.singleFrameEnabled);
+    }
+    if (savedSession.singleFrameTone && GRID_FRAME_TONES[savedSession.singleFrameTone]) {
+      state.singleFrameTone = savedSession.singleFrameTone;
     }
     if (
       savedSession.popSheetStyle === "warhol"
@@ -4182,11 +4549,13 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
     syncActiveBgToggle();
     renderNoMinimalModeRail();
-    renderPaintTargetRail();
+    renderPaintModeRails();
     renderNoiseTargetRail();
     renderStartModeRail();
+    syncSingleFrameUi();
     syncMaskUi();
-    canvas.setPaintTarget(state.activePaintTarget);
+    applySingleFrameState();
+    setPaintMode(state.paintMode, { quiet: true });
     canvas.setShowNoiseMask(state.showNoiseMask);
     canvas.setSourceOverlayVisible(state.sourceOverlayVisible);
     setActivePresetTab(state.activePresetTab);
@@ -4207,6 +4576,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       state.noiseGifAvailable = cfg.noiseGifAvailable !== false;
       state.noGalleryAvailable = cfg.noGalleryAvailable !== false;
       state.globalGalleryEnabled = cfg.globalGalleryEnabled === true;
+      state.galleryStorage = state.globalGalleryEnabled ? "sqlite" : "unavailable";
       if (!state.noiseGifAvailable) {
         els.exportGif.title = "Animated grain GIF will render in-browser on live deploys.";
       }
@@ -4215,7 +4585,9 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
         refreshGallery({ silent: true });
       }
       updateExportButtons();
-      setTopbarStatus("Studio mode · traits speak in relief");
+      setTopbarStatus(state.globalGalleryEnabled
+        ? "Studio mode · traits speak in relief"
+        : "Studio mode · shared No-Gallery offline");
     })
     .catch(() => {});
 

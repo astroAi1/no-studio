@@ -68,9 +68,12 @@ export function createStudioTemplate() {
                 <input class="canvas-quick-hex" data-role="stage-color-hex" type="text" value="#FFFFFF" maxlength="7" spellcheck="false" autocomplete="off" />
                 <button class="preset-btn canvas-quick-deck" type="button" data-role="open-dock-colors">Deck</button>
               </div>
-              <div class="theory-rail canvas-quick-paint" data-role="stage-paint-target-rail">
-                <button class="theory-btn is-active" type="button" data-paint-target="content">Content</button>
-                <button class="theory-btn" type="button" data-paint-target="background">BG</button>
+              <div class="theory-rail canvas-quick-paint" data-role="stage-paint-mode-rail">
+                <button class="theory-btn is-active" type="button" data-paint-mode="create">Create</button>
+                <button class="theory-btn" type="button" data-paint-mode="role">Role</button>
+              </div>
+              <div class="theory-rail canvas-quick-paint" data-role="stage-role-target-rail" hidden>
+                <button class="theory-btn is-active" type="button" data-paint-target="background">BG</button>
                 <button class="theory-btn" type="button" data-paint-target="outline">OL</button>
                 <button class="theory-btn" type="button" data-paint-target="erase">Erase</button>
               </div>
@@ -121,14 +124,17 @@ export function createStudioTemplate() {
           <div class="palette-curation-actions">
             <button class="preset-btn" type="button" data-role="restore-last-session" hidden>Restore Last Session</button>
           </div>
-          <div class="studio-subheading">Paint Target</div>
+          <div class="studio-subheading">Paint Mode</div>
+          <div class="theory-rail" data-role="paint-mode-rail">
+            <button class="theory-btn is-active" type="button" data-paint-mode="create">Create</button>
+            <button class="theory-btn" type="button" data-paint-mode="role">Role</button>
+          </div>
           <div class="theory-rail" data-role="paint-target-rail">
-            <button class="theory-btn is-active" type="button" data-paint-target="content">Content</button>
             <button class="theory-btn" type="button" data-paint-target="background">Background</button>
             <button class="theory-btn" type="button" data-paint-target="outline">Outline</button>
             <button class="theory-btn" type="button" data-paint-target="erase">Erase</button>
           </div>
-          <div class="mini-note">Background and outline always normalize back to the global +4 role pair.</div>
+          <div class="mini-note">Create mode paints content. Role mode unlocks background, outline, and erase. Background and outline always normalize back to the global +4 role pair.</div>
           <div class="role-pair-readout hero-role-pair" data-role="hero-role-pair"></div>
           <button class="preset-btn" type="button" data-role="source-overlay-toggle">Show Source Overlay · Off</button>
         </div>
@@ -220,6 +226,17 @@ export function createStudioTemplate() {
 
         <div class="sidebar-section" data-role="gallery-section">
           <div class="sidebar-heading">Share</div>
+          <div class="studio-subheading">Single Frame</div>
+          <div class="theory-rail" data-role="single-frame-rail">
+            <button class="theory-btn is-active" type="button" data-single-frame="off">Off</button>
+            <button class="theory-btn" type="button" data-single-frame="on">On</button>
+          </div>
+          <div class="theory-rail" data-role="single-frame-tone-rail">
+            <button class="theory-btn is-active" type="button" data-single-frame-tone="black">Black</button>
+            <button class="theory-btn" type="button" data-single-frame-tone="white">White</button>
+            <button class="theory-btn" type="button" data-single-frame-tone="cream">Off White</button>
+            <button class="theory-btn" type="button" data-single-frame-tone="stone">Stone</button>
+          </div>
           <label class="gallery-signature-field" for="gallery-signature-input">
             <span class="gallery-signature-label">Sign (optional)</span>
             <input id="gallery-signature-input" name="gallery_signature" class="gallery-signature-input" data-role="gallery-signature" type="text" placeholder="@yourhandle" maxlength="16" autocomplete="off" />
@@ -229,7 +246,7 @@ export function createStudioTemplate() {
             <button class="preset-btn preset-btn--gallery" type="button" data-role="save-gallery-gif" disabled>Save GIF To No-Gallery</button>
             <a class="preset-btn preset-btn--gallery-link" data-role="open-gallery-link" href="/tools/no-gallery">Open No-Gallery</a>
           </div>
-          <div class="mini-note">Shared when available. Falls back to browser-local if the shared gallery is down.</div>
+          <div class="mini-note">Community gallery only. If shared No-Gallery is unavailable, save and voting stay disabled.</div>
         </div>
       </div>
 

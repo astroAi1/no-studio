@@ -24,10 +24,13 @@ class FakeContext2D {
     this.globalAlpha = 1;
     this.lineWidth = 1;
     this._imageData = new FakeImageData(new Uint8ClampedArray(canvas.width * canvas.height * 4), canvas.width, canvas.height);
+    this._fillRects = [];
   }
 
   clearRect() {}
-  fillRect() {}
+  fillRect(x, y, width, height) {
+    this._fillRects.push({ x, y, width, height, fillStyle: this.fillStyle });
+  }
   drawImage() {}
   strokeRect() {}
   save() {}
@@ -187,4 +190,99 @@ test("studio canvas can switch to silhouette and blank starts", async () => {
   assert.ok(composition.roleGrid.every((role) => role === "b"));
   assert.ok(composition.contentGrid.every((value) => value === null));
   assert.ok(composition.noiseMask.every((value) => value === 0));
+});
+
+test("studio canvas keeps the live composition export stable while sheet mode is active", async () => {
+  installCanvasDom();
+  const { StudioCanvas } = await import(STUDIO_CANVAS_URL);
+
+  const display = new FakeCanvas(240, 240);
+  const canvas = new StudioCanvas(display);
+  canvas.loadImageData(buildSampleImageData());
+
+  const magentaTile = canvas.buildMappedImageData({
+    "#C89A61": "#FF00FF",
+  }, {
+    background: "#101010",
+    outline: "#141414",
+  });
+  const cyanTile = canvas.buildMappedImageData({
+    "#C89A61": "#00EEFF",
+  }, {
+    background: "#202020",
+    outline: "#242424",
+  });
+
+  canvas.setSheetTiles([magentaTile, cyanTile], 2, 1, {
+    frameFill: "#040404",
+    frameStroke: "rgba(255,255,255,0.18)",
+  });
+
+  const composition = canvas.exportCompositionImageData();
+  const offset = ((0 * composition.width) + 2) * 4;
+  const exportedHex = `#${[composition.data[offset], composition.data[offset + 1], composition.data[offset + 2]]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase()}`;
+
+  assert.equal(exportedHex, "#C89A61");
+  assert.ok(canvas.getCompositionPalette().includes("#C89A61"));
+  assert.ok(!canvas.getCompositionPalette().includes("#FF00FF"));
+});
+
+test("studio canvas touch fill and eyedropper work on mobile-sized canvases", async () => {
+  installCanvasDom();
+  const { StudioCanvas } = await import(STUDIO_CANVAS_URL);
+
+  let pickedHex = null;
+  const display = new FakeCanvas(240, 240);
+  const canvas = new StudioCanvas(display, {
+    onColorPick: (hex) => {
+      pickedHex = hex;
+    },
+  });
+  canvas.loadImageData(buildSampleImageData());
+
+  const touchAt = (x, y) => ({
+    preventDefault() {},
+    touches: [{
+      clientX: (x * 10) + 5,
+      clientY: (y * 10) + 5,
+    }],
+  });
+
+  canvas.setActiveColorHex("#AA00FF");
+  canvas.setPaintTarget("content");
+  canvas.setTool("fill");
+  canvas._onTouchStart(touchAt(2, 0));
+  assert.equal(canvas.getPixelHex(2, 0), "#AA00FF");
+
+  canvas.setTool("eyedropper");
+  canvas._onTouchStart(touchAt(2, 0));
+  assert.equal(pickedHex, "#AA00FF");
+});
+
+test("studio canvas single frame state affects single-work export rendering", async () => {
+  installCanvasDom();
+  const { StudioCanvas } = await import(STUDIO_CANVAS_URL);
+
+  const display = new FakeCanvas(240, 240);
+  const canvas = new StudioCanvas(display);
+  canvas.loadImageData(buildSampleImageData());
+
+  const plainExport = canvas.exportPng1024();
+  assert.equal(plainExport.getContext()._fillRects.length, 0);
+
+  canvas.setSingleFrame({
+    enabled: true,
+    style: {
+      frameFill: "#040404",
+      frameStroke: "rgba(255,255,255,0.18)",
+    },
+  });
+
+  const framedExport = canvas.exportPng1024();
+  assert.ok(framedExport.getContext()._fillRects.length > 0);
+  assert.equal(canvas.getSingleFrame().enabled, true);
+  assert.equal(canvas.getSingleFrame().style.frameFill, "#040404");
 });
