@@ -106,6 +106,7 @@ export function createStudioTemplate() {
       <div class="studio-dock-scrim" data-role="dock-scrim" aria-hidden="true"></div>
 
       <div class="studio-sidebar is-open" data-role="sidebar">
+        <div class="sidebar-pill" aria-hidden="true"></div>
         <div class="sidebar-hero" data-role="sidebar-hero">
           <div class="sidebar-hero-head">
             <div class="sidebar-hero-copyblock">

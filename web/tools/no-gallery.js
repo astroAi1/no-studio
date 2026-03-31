@@ -59,7 +59,7 @@ function reactionLabel(item) {
 
 function buildReactionMarkup(item, storage = "sqlite") {
   const reaction = String(item?.viewerReaction || "").trim().toLowerCase();
-  const disabled = storage !== "sqlite";
+  const disabled = storage === "unavailable";
   const locked = String(item?.weekState || "live") === "archived";
   return `
     <div class="no-gallery-reactions">
