@@ -33,11 +33,12 @@ export function railContextSignature({
   familyModifiers,
 }) {
   const safeFamily = FAMILY_IDS.includes(family) ? family : "mono";
+  const activeHexSignature = useActiveBg ? String(selectedActiveHex || "") : "";
   return [
     Number(tokenId) || 0,
     safeFamily,
     String(sourcePaletteSignature || ""),
-    String(selectedActiveHex || ""),
+    activeHexSignature,
     String(noMinimalMode || "exact"),
     useActiveBg ? 1 : 0,
     Boolean(lockState?.background) ? 1 : 0,

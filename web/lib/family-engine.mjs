@@ -31,6 +31,14 @@ export const FAMILY_LABELS = {
   pastel: "Pastel",
 };
 
+const FAMILY_BACKGROUND_FALLBACKS = {
+  mono: "#6B6B6B",
+  chrome: "#94A1B6",
+  warhol: "#D94B2B",
+  acid: "#4E8F1B",
+  pastel: "#E6D7E8",
+};
+
 const SCORE_WEIGHTS = {
   hue: 30,
   lightness: 22,
@@ -194,6 +202,10 @@ function chooseAnchorHex(classified, family, fallbackHex) {
     return String(nonRole[nonRole.length - 1].hex || fallbackHex).toUpperCase();
   }
   return String(nonRole[Math.floor((nonRole.length - 1) * 0.5)]?.hex || fallbackHex).toUpperCase();
+}
+
+function defaultFamilyBackgroundAnchorHex(family) {
+  return String(FAMILY_BACKGROUND_FALLBACKS[normalizeFamilyId(family)] || FAMILY_BACKGROUND_FALLBACKS.mono).toUpperCase();
 }
 
 function strictRolePairFromBackground(backgroundHex) {
@@ -652,7 +664,7 @@ function makeBackgroundRolePair({
   lockedBackgroundHex,
   context,
 }) {
-  const fallbackHex = String(selectedActiveHex || "#6B6B6B").toUpperCase();
+  const fallbackHex = defaultFamilyBackgroundAnchorHex(family);
   if (lockedBackgroundHex) {
     return strictRolePairFromBackground(lockedBackgroundHex);
   }

@@ -190,6 +190,32 @@ test("family engine uses novelty history to avoid near-duplicate accepted varian
   assert.match(String(withHistory.meta.intendedFamily || ""), /warhol/);
 });
 
+test("family casts ignore selected active hex when active background mode is off", async () => {
+  const { buildFamilyVariant } = await import(FAMILY_ENGINE_URL);
+  const classified = [
+    { hex: "#000000", role: "background" },
+    { hex: "#040404", role: "outline" },
+  ];
+
+  const a = buildFamilyVariant({
+    ...buildBaseOptions(),
+    family: "acid",
+    classified,
+    selectedActiveHex: "#FF0088",
+    useActiveBg: false,
+  });
+  const b = buildFamilyVariant({
+    ...buildBaseOptions(),
+    family: "acid",
+    classified,
+    selectedActiveHex: "#00FFD0",
+    useActiveBg: false,
+  });
+
+  assert.equal(a.paletteSignature, b.paletteSignature, "active swatch should not steer blank/minimal family casts when background anchoring is off");
+  assert.equal(a.roles.background, b.roles.background, "family-picked backgrounds should stay stable when the active swatch changes");
+});
+
 test("rail context signature changes when novelty history changes", async () => {
   const { railContextSignature } = await import(FAMILY_RAIL_URL);
   const common = {
@@ -227,4 +253,43 @@ test("rail context signature changes when novelty history changes", async () => 
   });
 
   assert.notEqual(a, b);
+});
+
+test("rail context signature ignores selected active hex when active background mode is off", async () => {
+  const { railContextSignature } = await import(FAMILY_RAIL_URL);
+  const common = {
+    tokenId: 7804,
+    family: "mono",
+    sourcePaletteSignature: "source-a",
+    noMinimalMode: "exact",
+    useActiveBg: false,
+    lockState: {
+      background: false,
+      accentBias: false,
+      curatedMap: false,
+    },
+    curatedMapSignature: "curated-a",
+    noveltyHistorySignature: "hist-a",
+    globalModifiers: {
+      toneCount: 5,
+      contrast: 62,
+      traitFocus: 54,
+      paletteDrift: 28,
+    },
+    familyModifiers: {
+      hueDrift: 8,
+      stepCompression: 56,
+    },
+  };
+
+  const a = railContextSignature({
+    ...common,
+    selectedActiveHex: "#FF0088",
+  });
+  const b = railContextSignature({
+    ...common,
+    selectedActiveHex: "#00FFD0",
+  });
+
+  assert.equal(a, b);
 });

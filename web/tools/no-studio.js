@@ -1728,11 +1728,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
   }
 
   function currentRailContextSignature(family) {
+    const activeHexForFamilyCast = state.useActiveBg ? selectedActiveHex() : "";
     return railContextSignature({
       tokenId: state.selected?.id || 0,
       family,
       sourcePaletteSignature: currentSourcePaletteSignature(),
-      selectedActiveHex: selectedActiveHex(),
+      selectedActiveHex: activeHexForFamilyCast,
       noMinimalMode: state.noMinimalDeltaMode,
       useActiveBg: state.useActiveBg,
       lockState: state.variantRailLocks,
@@ -1777,7 +1778,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       globalModifiers: state.globalModifiers,
       familyModifiers: state.familyModifiers[family] || {},
       noMinimalMode: state.noMinimalDeltaMode,
-      selectedActiveHex: selectedActiveHex(),
+      selectedActiveHex: state.useActiveBg ? selectedActiveHex() : "",
       useActiveBg: state.useActiveBg,
       curatedPaletteMap: state.curatedPaletteMap,
       lockState: state.variantRailLocks,
@@ -3838,7 +3839,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     if (savedSession.activeColor) state.activeColor = savedSession.activeColor;
     if (savedSession.activeColorHex) state.activeColorHex = savedSession.activeColorHex;
     if (savedSession.noMinimalDeltaMode) state.noMinimalDeltaMode = savedSession.noMinimalDeltaMode;
-    if (savedSession.useActiveBg != null) state.useActiveBg = savedSession.useActiveBg;
+    if (savedSession.useActiveBg != null) state.useActiveBg = Boolean(savedSession.useActiveBg);
     if (savedSession.activePaintTarget) state.activePaintTarget = savedSession.activePaintTarget;
     if (savedSession.globalModifiers && typeof savedSession.globalModifiers === "object") {
       state.globalModifiers = {
@@ -3902,6 +3903,9 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
     syncColorUI();
     syncGlobalModifierUI();
+    if (!els.activeBgToggle) {
+      state.useActiveBg = false;
+    }
     syncActiveBgToggle();
     renderNoMinimalModeRail();
     renderPaintTargetRail();
