@@ -199,7 +199,7 @@ def _render_grid(output_path: str, cell_size: int, columns: int, rows: int, fram
     }
 
 
-def _render_noise_gif(output_path: str, rgba24_b64: str, occupied_pixels: List[str], grain: Dict, size: int, frames: int, duration_ms: int) -> Dict:
+def _render_noise_gif(output_path: str, rgba24_b64: str, noise_mask_pixels: List[str], grain: Dict, size: int, frames: int, duration_ms: int) -> Dict:
     if not rgba24_b64:
         raise ValueError("rgba24B64 is required")
 
@@ -209,8 +209,6 @@ def _render_noise_gif(output_path: str, rgba24_b64: str, occupied_pixels: List[s
     if not enabled:
         raise ValueError("Animated GIF export requires active grain")
 
-    target = str(grain_cfg.get("target") or "background")
-    active_hex = str(grain_cfg.get("activeHex") or "").strip().upper() or None
     seed = max(0, int(grain_cfg.get("seed") or 0))
 
     out_size = int(size or 1024)
@@ -222,12 +220,11 @@ def _render_noise_gif(output_path: str, rgba24_b64: str, occupied_pixels: List[s
 
     base24 = _image_from_rgba_bytes(base64.b64decode(rgba24_b64)).convert("RGBA")
     base = base24.resize((out_size, out_size), Image.Resampling.NEAREST).convert("RGBA")
-    base24_pixels = list(base24.getdata())
-    occupied = _parse_occupied_pixels(occupied_pixels)
+    masked_pixels = _parse_occupied_pixels(noise_mask_pixels)
     pixel_scale = out_size / 24.0
 
     frames_out = []
-    salt = len(target)
+    salt = 7
     for frame_idx in range(frame_count):
         frame = base.copy()
         px = frame.load()
@@ -237,20 +234,8 @@ def _render_noise_gif(output_path: str, rgba24_b64: str, occupied_pixels: List[s
             sy = min(23, int(gy / pixel_scale))
             for gx in range(out_size):
                 sx = min(23, int(gx / pixel_scale))
-                is_occupied = (sx, sy) in occupied
-
-                if target == "background":
-                    if is_occupied:
-                        continue
-                elif target == "figure":
-                    if not is_occupied:
-                        continue
-                else:
-                    if not is_occupied or not active_hex:
-                        continue
-                    br, bg, bb, _ = base24_pixels[(sy * 24) + sx]
-                    if _rgb_to_hex((br, bg, bb)) != active_hex:
-                        continue
+                if (sx, sy) not in masked_pixels:
+                    continue
 
                 n = _noise_at(gx, gy, frame_seed, salt + frame_idx)
                 centered = (n - 0.5) * 2.0
@@ -337,7 +322,7 @@ def main():
             result = _render_noise_gif(
                 req["outputPath"],
                 req.get("rgba24B64"),
-                req.get("occupiedPixels") or [],
+                req.get("noiseMask") or [],
                 req.get("grain") or {},
                 int(req.get("size") or 1024),
                 int(req.get("frames") or 12),

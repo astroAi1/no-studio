@@ -1,5 +1,9 @@
 import { hexToRgb } from "./color.js";
 
+const CANONICAL_ROLE_BG = "#000000";
+const CANONICAL_ROLE_FG = "#040404";
+const SOURCE_OUTLINE_ALIASES = new Set(["#040404", "#0B0B0D"]);
+
 function normalizeRgba24Bytes(bytes) {
   const source = bytes instanceof Uint8ClampedArray ? bytes : new Uint8ClampedArray(bytes || []);
   if (source.length !== 24 * 24 * 4) {
@@ -39,7 +43,24 @@ export function createSourceImageDataFromImage(image) {
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, 24, 24);
   ctx.drawImage(image, 0, 0, 24, 24);
-  return ctx.getImageData(0, 0, 24, 24);
+  return normalizeNoPunkSourceImageData(ctx.getImageData(0, 0, 24, 24));
+}
+
+export function normalizeNoPunkSourceImageData(imageData) {
+  const data = imageData?.data;
+  if (!data || !Number.isFinite(imageData?.width) || !Number.isFinite(imageData?.height)) {
+    throw new Error("Invalid source image data");
+  }
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    const hex = `#${data[i].toString(16).padStart(2, "0")}${data[i + 1].toString(16).padStart(2, "0")}${data[i + 2].toString(16).padStart(2, "0")}`.toUpperCase();
+    if (!SOURCE_OUTLINE_ALIASES.has(hex)) continue;
+    data[i] = 0x04;
+    data[i + 1] = 0x04;
+    data[i + 2] = 0x04;
+    data[i + 3] = 0xFF;
+  }
+  return imageData;
 }
 
 export function extractVisiblePaletteHexFromImageData(imageData) {
@@ -185,9 +206,12 @@ export function getOccupiedPixels(imageData) {
 
 /**
  * Classify each occupied pixel's role based on color.
- * - #000000 → "background"
+ * The source art is normalized before classification:
+ * - transparent pixels are the background lane
+ * - visible structural black aliases are canonicalized to #040404
+ * Role assignment then becomes:
  * - #040404 → "outline"
- * - Others with luminance < 20 → "outline" (dark structural)
+ * - all other visible source colors remain non-role colors
  * - Others → sorted by frequency: top 60% = "body", rest = "accent"
  * @param {ImageData} imageData
  * @returns {Map<string, string>} Map of "x,y" → role
@@ -208,20 +232,16 @@ export function classifyPixelRoles(imageData) {
 
   // Determine body vs accent threshold
   const sorted = [...colorCounts.entries()]
-    .filter(([hex]) => hex !== "#000000" && hex !== "#040404")
-    .filter(([hex]) => {
-      const rgb = hexToRgb(hex);
-      return (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) >= 20;
-    })
+    .filter(([hex]) => hex !== CANONICAL_ROLE_BG && hex !== CANONICAL_ROLE_FG)
     .sort((a, b) => b[1] - a[1]);
 
-  const totalNonDark = sorted.reduce((s, [, c]) => s + c, 0);
+  const totalNonRole = sorted.reduce((s, [, c]) => s + c, 0);
   let cumulative = 0;
   const bodyColors = new Set();
   for (const [hex, count] of sorted) {
     cumulative += count;
     bodyColors.add(hex);
-    if (cumulative >= totalNonDark * 0.6) break;
+    if (cumulative >= totalNonRole * 0.6) break;
   }
 
   // Second pass: assign roles
@@ -231,12 +251,9 @@ export function classifyPixelRoles(imageData) {
     const py = Math.floor(i / 4 / w);
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`.toUpperCase();
-    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
     let role;
-    if (hex === "#000000") role = "background";
-    else if (hex === "#040404") role = "outline";
-    else if (luma < 20) role = "outline";
+    if (hex === CANONICAL_ROLE_BG) role = "background";
+    else if (hex === CANONICAL_ROLE_FG) role = "outline";
     else if (bodyColors.has(hex)) role = "body";
     else role = "accent";
 

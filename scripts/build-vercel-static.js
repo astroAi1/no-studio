@@ -44,7 +44,7 @@ function assertBundledStaticAssets() {
   }
   const rel = missing.map((filePath) => path.relative(appDir, filePath)).join(", ");
   throw new Error(
-    `[No-Studio] Missing bundled static assets: ${rel}. ` +
+    `[Recovery Faults] Missing bundled static assets: ${rel}. ` +
     "This repo now expects the Vercel build to be self-contained. Commit the web/data and web/fonts assets before deploying.",
   );
 }
@@ -60,6 +60,7 @@ function main() {
   copyFile(indexSrc, path.join(distDir, "404.html"));
 
   const routeAliases = [
+    "tools/recovery-faults",
     "no-gallery",
     "tools/no-studio",
     "tools/no-gallery",
@@ -73,7 +74,7 @@ function main() {
     copyFile(indexSrc, path.join(distDir, routePath, "index.html"));
   }
 
-  console.log("[No-Studio] Static build complete:", distDir);
+  console.log("[Recovery Faults] Static build complete:", distDir);
 }
 
 main();

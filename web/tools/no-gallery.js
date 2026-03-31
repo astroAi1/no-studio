@@ -1,4 +1,8 @@
-import { listNoStudioGallery } from "../api.js";
+import {
+  getNoStudioGalleryHome,
+  getNoStudioGalleryWeek,
+  voteNoStudioGallery,
+} from "../api.js";
 
 function escapeHtml(value) {
   return String(value || "")
@@ -18,8 +22,7 @@ function mediaUrlOf(item) {
 }
 
 function signatureOf(item) {
-  const value = String(item?.signatureHandle || item?.signature || item?.twitterHandle || "").trim();
-  return value;
+  return String(item?.signatureHandle || item?.signature || item?.twitterHandle || "").trim();
 }
 
 function paletteOf(item) {
@@ -33,24 +36,12 @@ function paletteOf(item) {
     out.push(hex);
     if (out.length >= 64) break;
   }
-  if (!out.length) {
-    const bg = String(item?.rolePair?.background || "").trim().toUpperCase();
-    const fg = String(item?.rolePair?.figure || "").trim().toUpperCase();
-    if (/^#[0-9A-F]{6}$/.test(bg)) {
-      out.push(bg);
-      dedupe.add(bg);
-    }
-    if (/^#[0-9A-F]{6}$/.test(fg) && !dedupe.has(fg)) {
-      out.push(fg);
-    }
-  }
   return out;
 }
 
-function paletteSwatchesMarkup(palette, limit = null) {
+function paletteSwatchesMarkup(palette, limit = 8) {
   if (!palette.length) return "";
-  const hasLimit = Number.isFinite(limit);
-  const preview = hasLimit ? palette.slice(0, limit) : palette;
+  const preview = palette.slice(0, limit);
   const remaining = Math.max(0, palette.length - preview.length);
   return `
     <span class="no-gallery-palette-strip">
@@ -60,49 +51,37 @@ function paletteSwatchesMarkup(palette, limit = null) {
   `;
 }
 
-function rgbToHex(r, g, b) {
-  return `#${[r, g, b].map((value) => Number(value).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+function reactionLabel(item) {
+  const noCount = Number(item?.noCount ?? item?.voteCount) || 0;
+  const yesCount = Number(item?.yesCount) || 0;
+  return `NO ${noCount} · YES ${yesCount}`;
 }
 
-function extractPaletteFromMedia(url, max = 16) {
-  if (!url) return Promise.resolve([]);
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.decoding = "async";
-    img.loading = "eager";
-    img.onload = () => {
-      try {
-        const sampleSize = 24;
-        const canvas = document.createElement("canvas");
-        canvas.width = sampleSize;
-        canvas.height = sampleSize;
-        const ctx = canvas.getContext("2d", { alpha: true });
-        ctx.imageSmoothingEnabled = false;
-        ctx.clearRect(0, 0, sampleSize, sampleSize);
-        ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
-        const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
-        const counts = new Map();
-        for (let i = 0; i < data.length; i += 4) {
-          const a = data[i + 3];
-          if (a === 0) continue;
-          const hex = rgbToHex(data[i], data[i + 1], data[i + 2]);
-          counts.set(hex, (counts.get(hex) || 0) + 1);
-        }
-        const palette = [...counts.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .map(([hex]) => hex)
-          .slice(0, max);
-        resolve(palette);
-      } catch {
-        resolve([]);
-      }
-    };
-    img.onerror = () => resolve([]);
-    img.src = url;
-  });
+function buildReactionMarkup(item, storage = "sqlite") {
+  const reaction = String(item?.viewerReaction || "").trim().toLowerCase();
+  const disabled = storage !== "sqlite" && storage !== "browser";
+  const locked = String(item?.weekState || "live") === "archived";
+  return `
+    <div class="no-gallery-reactions">
+      <button
+        class="no-gallery-react-btn${reaction === "no" ? " is-active" : ""}"
+        type="button"
+        data-react-id="${escapeHtml(item?.id || "")}"
+        data-reaction="no"
+        ${disabled || locked ? "disabled" : ""}
+      >NO</button>
+      <button
+        class="no-gallery-react-btn${reaction === "yes" ? " is-active" : ""}"
+        type="button"
+        data-react-id="${escapeHtml(item?.id || "")}"
+        data-reaction="yes"
+        ${disabled || locked ? "disabled" : ""}
+      >YES</button>
+    </div>
+  `;
 }
 
-function buildCardMarkup(item) {
+function buildLiveCardMarkup(item, storage = "sqlite") {
   const mediaUrl = mediaUrlOf(item);
   const mediaType = mediaTypeOf(item);
   const label = item?.label || `No-Studio #${Number(item?.tokenId) || 0}`;
@@ -113,17 +92,64 @@ function buildCardMarkup(item) {
   const pair = bg && fg
     ? `${escapeHtml(bg)} → ${escapeHtml(fg)}`
     : "Role pair unavailable";
+  const stateLine = String(item?.viewerReaction || "").trim()
+    ? `You chose ${String(item.viewerReaction).toUpperCase()}`
+    : reactionLabel(item);
   return `
-    <button type="button" class="no-gallery-card" data-gallery-open="${escapeHtml(item?.id || "")}">
-      <img class="no-gallery-card-media" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(label)}" loading="lazy" />
-      <span class="no-gallery-card-meta">
-        <strong class="no-gallery-card-title">${escapeHtml(label)}</strong>
-        <span class="no-gallery-card-sub">#${Number(item?.tokenId) || 0} · ${(item?.family || "studio").toUpperCase()} · ${mediaType.toUpperCase()}</span>
-        <span class="no-gallery-card-sub">${pair}</span>
-        ${paletteSwatchesMarkup(palette, 8)}
-        ${signature ? `<span class="no-gallery-card-sign">${escapeHtml(signature)}</span>` : ""}
+    <article class="no-gallery-card-shell">
+      <a class="no-gallery-card" href="${escapeHtml(item?.viewUrl || mediaUrl || "#")}" target="_blank" rel="noreferrer">
+        <img class="no-gallery-card-media" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(label)}" loading="lazy" />
+        <span class="no-gallery-card-meta">
+          <strong class="no-gallery-card-title">${escapeHtml(label)}</strong>
+          <span class="no-gallery-card-sub">#${Number(item?.tokenId) || 0} · ${(item?.family || "studio").toUpperCase()} · ${mediaType.toUpperCase()}</span>
+          <span class="no-gallery-card-sub">${pair}</span>
+          <span class="no-gallery-card-sub">${escapeHtml(stateLine)}</span>
+          ${paletteSwatchesMarkup(palette)}
+          ${signature ? `<span class="no-gallery-card-sign">${escapeHtml(signature)}</span>` : ""}
+        </span>
+      </a>
+      <div class="no-gallery-card-foot">
+        ${buildReactionMarkup(item, storage)}
+      </div>
+    </article>
+  `;
+}
+
+function buildArchiveCoverMarkup(week) {
+  const covers = Array.isArray(week?.coverEntries) ? week.coverEntries.slice(0, 9) : [];
+  if (!covers.length) {
+    return `<div class="no-gallery-week-cover-empty">No cover</div>`;
+  }
+  return `
+    <div class="no-gallery-week-cover-grid">
+      ${covers.map((item) => `<img class="no-gallery-week-cover-tile" src="${escapeHtml(mediaUrlOf(item))}" alt="" loading="lazy" />`).join("")}
+    </div>
+  `;
+}
+
+function buildArchiveCardMarkup(week) {
+  const startedAt = week?.startedAt ? new Date(week.startedAt).toLocaleDateString() : "Unknown";
+  const endsAt = week?.endsAt ? new Date(week.endsAt).toLocaleDateString() : "Unknown";
+  return `
+    <button class="no-gallery-week-card" type="button" data-open-week="${escapeHtml(week?.weekId || "")}">
+      <span class="no-gallery-week-cover">
+        ${buildArchiveCoverMarkup(week)}
+      </span>
+      <span class="no-gallery-week-meta">
+        <strong>Week ${escapeHtml(startedAt)} → ${escapeHtml(endsAt)}</strong>
+        <span>${Number(week?.entryCount) || 0} curations</span>
+        <span>Top NO ${Number(week?.topNoCount) || 0}</span>
       </span>
     </button>
+  `;
+}
+
+function renderSortRail(sort = "new") {
+  return `
+    <div class="theory-rail no-gallery-sort-rail" data-role="gallery-sort-rail">
+      <button class="theory-btn${sort === "new" ? " is-active" : ""}" type="button" data-sort="new">New</button>
+      <button class="theory-btn${sort === "top" ? " is-active" : ""}" type="button" data-sort="top">Top</button>
+    </div>
   `;
 }
 
@@ -134,183 +160,203 @@ export function mountNoGalleryPage(root) {
         <div class="no-gallery-brand">
           <span class="no-gallery-kicker">Noir de Noir</span>
           <h1 class="no-gallery-title">No-Gallery</h1>
-          <p class="no-gallery-note">Saved curations from No-Studio. Click any piece to view at 1024×1024.</p>
+          <p class="no-gallery-note">Live week on top. Archived weeks below. NO is the good vote here.</p>
         </div>
         <div class="no-gallery-actions">
+          ${renderSortRail("new")}
           <a class="no-gallery-btn" href="/tools/no-studio">Back To Studio</a>
           <button class="no-gallery-btn" type="button" data-role="gallery-refresh">Refresh</button>
         </div>
       </header>
       <main class="no-gallery-grid-shell">
-        <div class="no-gallery-grid" data-role="gallery-grid">
-          <div class="no-gallery-empty">Loading No-Gallery...</div>
-        </div>
-      </main>
-      <div class="no-gallery-modal" data-role="gallery-modal" hidden>
-        <div class="no-gallery-modal-backdrop" data-role="gallery-modal-close"></div>
-        <article class="no-gallery-modal-panel">
-          <header class="no-gallery-modal-head">
-            <div class="no-gallery-modal-title" data-role="gallery-modal-title">No-Gallery Piece</div>
-            <button class="no-gallery-btn" type="button" data-role="gallery-modal-close">Close</button>
-          </header>
-          <div class="no-gallery-modal-media-wrap">
-            <img class="no-gallery-modal-media" data-role="gallery-modal-media" alt="No-Gallery preview" />
-          </div>
-          <footer class="no-gallery-modal-foot">
-            <div class="no-gallery-modal-meta">
-              <div class="no-gallery-modal-sign" data-role="gallery-modal-sign"></div>
-              <div class="no-gallery-modal-palette" data-role="gallery-modal-palette"></div>
+        <section class="no-gallery-section">
+          <div class="no-gallery-section-head">
+            <div>
+              <p class="no-gallery-section-kicker">Live</p>
+              <h2 class="no-gallery-section-title" data-role="live-week-title">This Week</h2>
             </div>
-            <a class="no-gallery-btn" data-role="gallery-modal-open-file" target="_blank" rel="noreferrer">Open File</a>
-          </footer>
-        </article>
-      </div>
+            <button class="no-gallery-btn" type="button" data-role="back-home" hidden>Back To Archive</button>
+          </div>
+          <div class="no-gallery-grid" data-role="live-grid">
+            <div class="no-gallery-empty">Loading No-Gallery...</div>
+          </div>
+        </section>
+        <section class="no-gallery-section" data-role="archive-section">
+          <div class="no-gallery-section-head">
+            <div>
+              <p class="no-gallery-section-kicker">Archive</p>
+              <h2 class="no-gallery-section-title">Past Weeks</h2>
+            </div>
+          </div>
+          <div class="no-gallery-archive-grid" data-role="archive-grid"></div>
+        </section>
+      </main>
     </section>
   `;
 
   const els = {
-    grid: root.querySelector("[data-role='gallery-grid']"),
+    liveGrid: root.querySelector("[data-role='live-grid']"),
+    archiveGrid: root.querySelector("[data-role='archive-grid']"),
     refresh: root.querySelector("[data-role='gallery-refresh']"),
-    modal: root.querySelector("[data-role='gallery-modal']"),
-    modalTitle: root.querySelector("[data-role='gallery-modal-title']"),
-    modalMedia: root.querySelector("[data-role='gallery-modal-media']"),
-    modalSign: root.querySelector("[data-role='gallery-modal-sign']"),
-    modalPalette: root.querySelector("[data-role='gallery-modal-palette']"),
-    modalOpenFile: root.querySelector("[data-role='gallery-modal-open-file']"),
+    sortRail: root.querySelector("[data-role='gallery-sort-rail']"),
+    backHome: root.querySelector("[data-role='back-home']"),
+    archiveSection: root.querySelector("[data-role='archive-section']"),
+    liveWeekTitle: root.querySelector("[data-role='live-week-title']"),
   };
 
   const state = {
-    items: [],
+    storage: "sqlite",
+    mode: "home",
+    sort: "new",
+    home: null,
+    week: null,
     loading: false,
-    activeItemId: null,
-    paletteHydratePass: 0,
   };
 
-  function closeModal() {
-    if (!els.modal) return;
-    state.activeItemId = null;
-    els.modal.hidden = true;
-    if (els.modalMedia) {
-      els.modalMedia.removeAttribute("src");
-    }
-  }
-
-  function openModal(item) {
-    if (!els.modal || !els.modalMedia || !item) return;
-    const mediaUrl = mediaUrlOf(item);
-    const label = item.label || `No-Studio #${Number(item.tokenId) || 0}`;
-    const signature = signatureOf(item);
-    const palette = paletteOf(item);
-    els.modalTitle.textContent = `${label} · ${mediaTypeOf(item).toUpperCase()}`;
-    els.modalMedia.src = mediaUrl;
-    els.modalMedia.alt = label;
-    els.modalSign.textContent = signature;
-    els.modalSign.classList.toggle("is-empty", !signature);
-    if (els.modalPalette) {
-      els.modalPalette.innerHTML = palette.length
-        ? paletteSwatchesMarkup(palette)
-        : "";
-      els.modalPalette.classList.toggle("is-empty", !palette.length);
-    }
-    els.modalOpenFile.href = item.viewUrl || mediaUrl;
-    state.activeItemId = String(item.id || "");
-    els.modal.hidden = false;
+  function currentItems() {
+    if (state.mode === "week" && state.week?.items) return state.week.items;
+    return state.home?.liveWeek?.items || [];
   }
 
   function render() {
-    if (!els.grid) return;
-    if (state.loading && !state.items.length) {
-      els.grid.innerHTML = `<div class="no-gallery-empty">Loading No-Gallery...</div>`;
+    if (els.sortRail) {
+      els.sortRail.querySelectorAll("[data-sort]").forEach((button) => {
+        button.classList.toggle("is-active", button.getAttribute("data-sort") === state.sort);
+      });
+    }
+    if (state.loading && !state.home && !state.week) {
+      if (els.liveGrid) els.liveGrid.innerHTML = `<div class="no-gallery-empty">Loading No-Gallery...</div>`;
+      if (els.archiveGrid) els.archiveGrid.innerHTML = "";
       return;
     }
-    if (!state.items.length) {
-      els.grid.innerHTML = `<div class="no-gallery-empty">No curations saved yet.</div>`;
-      return;
-    }
-    els.grid.innerHTML = state.items.map((item) => buildCardMarkup(item)).join("");
-    hydrateCardPalettes();
-  }
 
-  async function hydrateCardPalettes() {
-    if (!els.grid) return;
-    const pass = ++state.paletteHydratePass;
-    const cards = [...els.grid.querySelectorAll("[data-gallery-open]")];
-    for (const card of cards) {
-      if (pass !== state.paletteHydratePass) return;
-      const id = String(card.getAttribute("data-gallery-open") || "");
-      const item = state.items.find((entry) => String(entry?.id || "") === id);
-      if (!item) continue;
-      const existing = paletteOf(item);
-      if (existing.length > 2) continue;
-      const mediaUrl = mediaUrlOf(item);
-      const inferred = await extractPaletteFromMedia(mediaUrl, 16);
-      if (pass !== state.paletteHydratePass) return;
-      if (!inferred.length || inferred.length <= existing.length) continue;
-      item.palette = inferred;
-      const meta = card.querySelector(".no-gallery-card-meta");
-      if (!meta) continue;
-      const oldStrip = meta.querySelector(".no-gallery-palette-strip");
-      const markup = paletteSwatchesMarkup(inferred, 8);
-      if (oldStrip) {
-        oldStrip.outerHTML = markup;
-      } else if (markup) {
-        meta.insertAdjacentHTML("beforeend", markup);
+    if (state.mode === "week" && state.week?.week) {
+      const week = state.week.week;
+      if (els.liveWeekTitle) {
+        const started = week.startedAt ? new Date(week.startedAt).toLocaleDateString() : "Unknown";
+        const ended = week.endsAt ? new Date(week.endsAt).toLocaleDateString() : "Unknown";
+        els.liveWeekTitle.textContent = `Week ${started} → ${ended}`;
       }
+      if (els.backHome) els.backHome.hidden = false;
+      if (els.archiveSection) els.archiveSection.hidden = true;
+      const items = Array.isArray(state.week.items) ? state.week.items : [];
+      if (els.liveGrid) {
+        els.liveGrid.innerHTML = items.length
+          ? items.map((item) => buildLiveCardMarkup(item, state.storage)).join("")
+          : `<div class="no-gallery-empty">No curations in this week.</div>`;
+      }
+      return;
+    }
+
+    if (els.backHome) els.backHome.hidden = true;
+    if (els.archiveSection) els.archiveSection.hidden = false;
+    const liveWeek = state.home?.liveWeek || null;
+    const liveItems = Array.isArray(liveWeek?.items) ? liveWeek.items : [];
+    if (els.liveWeekTitle) {
+      els.liveWeekTitle.textContent = liveWeek ? "This Week" : "No Live Week Yet";
+    }
+    if (els.liveGrid) {
+      els.liveGrid.innerHTML = liveItems.length
+        ? liveItems.map((item) => buildLiveCardMarkup(item, state.storage)).join("")
+        : `<div class="no-gallery-empty">No live week yet. The next curation starts it.</div>`;
+    }
+    const archives = Array.isArray(state.home?.archives) ? state.home.archives : [];
+    if (els.archiveGrid) {
+      els.archiveGrid.innerHTML = archives.length
+        ? archives.map((week) => buildArchiveCardMarkup(week)).join("")
+        : `<div class="no-gallery-empty">No archived weeks yet.</div>`;
     }
   }
 
-  async function loadGallery() {
+  async function loadHome() {
+    state.loading = true;
+    state.mode = "home";
+    render();
+    try {
+      const payload = await getNoStudioGalleryHome({ sort: state.sort, liveLimit: 120, archiveLimit: 24 });
+      state.home = payload;
+      state.week = null;
+      state.storage = String(payload?.storage || "sqlite");
+    } finally {
+      state.loading = false;
+      render();
+    }
+  }
+
+  async function loadWeek(weekId) {
     state.loading = true;
     render();
     try {
-      const payload = await listNoStudioGallery({ limit: 120 });
-      state.items = Array.isArray(payload?.items) ? payload.items : [];
-    } catch (error) {
-      state.items = [];
-      if (els.grid) {
-        els.grid.innerHTML = `<div class="no-gallery-empty">${escapeHtml(error.message || "No-Gallery unavailable")}</div>`;
-      }
+      const payload = await getNoStudioGalleryWeek(weekId, { sort: state.sort, limit: 120 });
+      state.week = payload;
+      state.mode = "week";
+      state.storage = String(payload?.storage || state.home?.storage || "sqlite");
+    } finally {
       state.loading = false;
-      return;
+      render();
     }
-    state.loading = false;
+  }
+
+  function replaceItem(nextItem) {
+    if (!nextItem) return;
+    if (state.home?.liveWeek?.items) {
+      state.home.liveWeek.items = state.home.liveWeek.items.map((item) => String(item?.id || "") === String(nextItem.id) ? { ...item, ...nextItem } : item);
+    }
+    if (state.week?.items) {
+      state.week.items = state.week.items.map((item) => String(item?.id || "") === String(nextItem.id) ? { ...item, ...nextItem } : item);
+    }
     render();
   }
 
-  function onGridClick(event) {
-    const card = event.target.closest("[data-gallery-open]");
-    if (!card) return;
-    const id = card.getAttribute("data-gallery-open");
-    const item = state.items.find((entry) => String(entry.id) === String(id));
-    if (!item) return;
-    openModal(item);
-  }
-
-  function onModalClick(event) {
-    const closeTarget = event.target.closest("[data-role='gallery-modal-close']");
-    if (!closeTarget) return;
-    event.preventDefault();
-    closeModal();
-  }
-
-  function onKeyDown(event) {
-    if (event.key === "Escape") {
-      closeModal();
+  root.addEventListener("click", async (event) => {
+    const archiveButton = event.target.closest("[data-open-week]");
+    if (archiveButton) {
+      event.preventDefault();
+      const weekId = String(archiveButton.getAttribute("data-open-week") || "");
+      if (weekId) {
+        await loadWeek(weekId);
+      }
+      return;
     }
-  }
 
-  els.grid?.addEventListener("click", onGridClick);
-  els.refresh?.addEventListener("click", loadGallery);
-  els.modal?.addEventListener("click", onModalClick);
-  document.addEventListener("keydown", onKeyDown);
-  closeModal();
+    const reactionButton = event.target.closest("[data-react-id][data-reaction]");
+    if (reactionButton) {
+      event.preventDefault();
+      const id = String(reactionButton.getAttribute("data-react-id") || "");
+      const reaction = String(reactionButton.getAttribute("data-reaction") || "no");
+      if (!id) return;
+      const payload = await voteNoStudioGallery(id, reaction);
+      replaceItem(payload?.item || null);
+      return;
+    }
+  });
 
-  loadGallery();
+  els.refresh?.addEventListener("click", () => {
+    if (state.mode === "week" && state.week?.week?.weekId) {
+      loadWeek(state.week.week.weekId);
+      return;
+    }
+    loadHome();
+  });
 
-  return () => {
-    els.grid?.removeEventListener("click", onGridClick);
-    els.refresh?.removeEventListener("click", loadGallery);
-    els.modal?.removeEventListener("click", onModalClick);
-    document.removeEventListener("keydown", onKeyDown);
-  };
+  els.backHome?.addEventListener("click", () => {
+    loadHome();
+  });
+
+  els.sortRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-sort]");
+    if (!button) return;
+    const nextSort = button.getAttribute("data-sort") === "top" ? "top" : "new";
+    if (nextSort === state.sort) return;
+    state.sort = nextSort;
+    if (state.mode === "week" && state.week?.week?.weekId) {
+      loadWeek(state.week.week.weekId);
+      return;
+    }
+    loadHome();
+  });
+
+  loadHome();
+
+  return () => {};
 }

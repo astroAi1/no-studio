@@ -68,7 +68,7 @@ async function renderNoPaletteGrid({ workerScriptPath, outputPath, cellSize, col
   });
 }
 
-async function renderNoPaletteNoiseGif({ workerScriptPath, outputPath, size, rgba24Bytes, occupiedPixels, grain, frames, durationMs }) {
+async function renderNoPaletteNoiseGif({ workerScriptPath, outputPath, size, rgba24Bytes, noiseMask, grain, frames, durationMs }) {
   return runNoPaletteWorker(workerScriptPath, {
     command: "render_noise_gif",
     outputPath,
@@ -76,7 +76,7 @@ async function renderNoPaletteNoiseGif({ workerScriptPath, outputPath, size, rgb
     frames,
     durationMs,
     rgba24B64: Buffer.isBuffer(rgba24Bytes) ? rgba24Bytes.toString("base64") : String(rgba24Bytes || ""),
-    occupiedPixels: Array.isArray(occupiedPixels) ? occupiedPixels : [],
+    noiseMask: Array.isArray(noiseMask) ? noiseMask : [],
     grain: grain || {},
   });
 }

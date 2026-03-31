@@ -1,10 +1,10 @@
 const PRIMARY_TOOL = "no-studio";
-const VALID_TOOLS = new Set([PRIMARY_TOOL, "no-gallery"]);
+const VALID_TOOLS = new Set([PRIMARY_TOOL, "no-gallery", "no-studio"]);
 const LEGACY_ALIASES = new Map([
-  ["no-palette", PRIMARY_TOOL],
-  ["no-generate", PRIMARY_TOOL],
-  ["gif-lab", PRIMARY_TOOL],
-  ["tcg-forge", PRIMARY_TOOL],
+  ["no-palette", "no-studio"],
+  ["no-generate", "no-studio"],
+  ["gif-lab", "no-studio"],
+  ["tcg-forge", "no-studio"],
 ]);
 
 export function toolPath(toolId = PRIMARY_TOOL) {

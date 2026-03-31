@@ -1,9 +1,12 @@
 import { getHealth } from "./api.js";
 import { mountNoStudioTool } from "./tools/no-studio.js";
 import { mountNoGalleryPage } from "./tools/no-gallery.js";
+import { mountRecoveryFaultsTool } from "./tools/recovery-faults.js";
+import { startRouter } from "./router.js";
 
 const root = document.getElementById("studio-root");
 let currentCleanup = null;
+let routerCleanup = null;
 
 function escapeHtmlForFatal(value) {
   return String(value || "")
@@ -25,6 +28,33 @@ function showFatalError(error) {
   }
 }
 
+function titleForTool(tool) {
+  if (tool === "no-gallery") return "No-Gallery";
+  if (tool === "no-studio") return "No-Studio";
+  return "No-Studio";
+}
+
+function mountTool(tool) {
+  if (currentCleanup) {
+    currentCleanup();
+    currentCleanup = null;
+  }
+  document.title = titleForTool(tool);
+  try {
+    if (tool === "no-gallery") {
+      currentCleanup = mountNoGalleryPage(root);
+      return;
+    }
+    if (tool === "no-studio") {
+      currentCleanup = mountNoStudioTool(root);
+      return;
+    }
+    currentCleanup = mountRecoveryFaultsTool(root);
+  } catch (error) {
+    showFatalError(error);
+  }
+}
+
 async function boot() {
   try {
     await getHealth();
@@ -32,15 +62,9 @@ async function boot() {
     console.warn("[No-Studio] API health check failed:", error.message);
   }
 
-  try {
-    const rawPath = String(window.location.pathname || "/").replace(/\/+$/, "") || "/";
-    const isGallery = rawPath === "/tools/no-gallery" || rawPath === "/no-gallery";
-    currentCleanup = isGallery
-      ? mountNoGalleryPage(root)
-      : mountNoStudioTool(root);
-  } catch (error) {
-    showFatalError(error);
-  }
+  routerCleanup = startRouter((tool) => {
+    mountTool(tool);
+  });
 }
 
 window.addEventListener("error", (event) => {

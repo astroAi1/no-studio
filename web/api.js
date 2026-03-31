@@ -6,6 +6,7 @@ const STATIC_STUDIO_CONFIG = {
   machineDrawerEnabled: false,
   noiseGifAvailable: false,
   noGalleryAvailable: true,
+  globalGalleryEnabled: false,
   modes: [
     { id: "canonical-machine", label: "Machine", descriptionShort: "Canonical block render", exportKinds: ["single"] },
     { id: "dither-study", label: "Texture", descriptionShort: "Pattern-led block render", exportKinds: ["single"] },
@@ -21,6 +22,7 @@ const BROWSER_GALLERY_LIMIT = 60;
 const BROWSER_GALLERY_DB_NAME = "no-studio-gallery-v3";
 const BROWSER_GALLERY_DB_VERSION = 1;
 const BROWSER_GALLERY_STORE = "entries";
+const NO_GALLERY_VIEWER_KEY = "no-gallery-viewer-id";
 const BROWSER_GALLERY_LEGACY_KEYS = ["no-studio-browser-gallery-v1", "no-studio-browser-gallery-v2"];
 const BROWSER_GALLERY_LEGACY_DBS = ["no-studio-gallery-v1", "no-studio-gallery-v2"];
 const GALLERY_REQUEST_TIMEOUT_MS = 4500;
@@ -28,6 +30,21 @@ let browserGalleryDbPromise = null;
 let browserGalleryMigrationDone = false;
 let browserGalleryLegacyPurgeDone = false;
 let sharedGalleryUnavailable = false;
+let globalGalleryEnabled = false;
+
+function getNoGalleryViewerId() {
+  try {
+    const existing = localStorage.getItem(NO_GALLERY_VIEWER_KEY);
+    if (existing) return existing;
+    const next = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `viewer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(NO_GALLERY_VIEWER_KEY, next);
+    return next;
+  } catch {
+    return "";
+  }
+}
 
 export async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
@@ -116,6 +133,14 @@ function isTimeoutApiError(error) {
   return String(error.message || "").includes("Request timed out");
 }
 
+function isRecoverableGalleryWriteError(error) {
+  if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+    return true;
+  }
+  const status = Number(error?.status);
+  return Number.isFinite(status) && status >= 500;
+}
+
 function sanitizeSignatureHandle(value) {
   const cleaned = String(value || "")
     .trim()
@@ -159,13 +184,27 @@ function normalizeBrowserGalleryItem(entry) {
   const mediaType = normalizeMediaType(entry && entry.mediaType);
   const mediaUrl = String(entry?.mediaUrl || "").trim();
   const palette = sanitizePalette(entry && (entry.palette || entry.paletteHexes || []));
+  const noCount = Number(entry?.noCount ?? entry?.voteCount) || 0;
+  const yesCount = Number(entry?.yesCount) || 0;
+  const viewerReaction = (() => {
+    const raw = String(entry?.viewerReaction || "").trim().toLowerCase();
+    return raw === "yes" || raw === "no" ? raw : null;
+  })();
   return {
     id: String(entry?.id || ""),
+    weekId: String(entry?.weekId || "browser-live"),
+    weekState: String(entry?.weekState || "live") === "archived" ? "archived" : "live",
     tokenId: Number(entry?.tokenId) || 0,
     family: sanitizeText(entry?.family, 32),
     label: sanitizeText(entry?.label, 160) || `No-Studio #${Number(entry?.tokenId) || 0}`,
     createdAt: entry?.createdAt || new Date().toISOString(),
     signatureHandle: sanitizeSignatureHandle(entry?.signatureHandle || entry?.signature || entry?.twitterHandle || ""),
+    voteCount: noCount,
+    noCount,
+    yesCount,
+    score: noCount - yesCount,
+    viewerReaction,
+    viewerHasVoted: viewerReaction === "no" || Boolean(entry?.viewerHasVoted),
     palette,
     paletteCount: palette.length,
     rolePair: entry?.rolePair && typeof entry.rolePair === "object"
@@ -351,6 +390,73 @@ async function listNoStudioGalleryBrowser({ limit = 18 } = {}) {
   };
 }
 
+async function getNoStudioGalleryHomeBrowser({ sort = "new", liveLimit = 120 } = {}) {
+  const payload = await listNoStudioGalleryBrowser({ limit: liveLimit });
+  const items = payload.items.slice().sort((a, b) => {
+    if (String(sort || "new").toLowerCase() === "top") {
+      return (Number(b.score) || 0) - (Number(a.score) || 0)
+        || (Number(b.noCount) || 0) - (Number(a.noCount) || 0)
+        || String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+    }
+    return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+  });
+  return {
+    ok: true,
+    storage: "browser",
+    global: false,
+    liveWeek: {
+      weekId: "browser-live",
+      startedAt: items[items.length - 1]?.createdAt || null,
+      endsAt: null,
+      closedAt: null,
+      weekState: "live",
+      count: items.length,
+      sort: String(sort || "new").toLowerCase() === "top" ? "top" : "new",
+      items,
+    },
+    activeWeek: items.length
+      ? {
+          weekId: "browser-live",
+          startedAt: items[items.length - 1]?.createdAt || null,
+          endsAt: null,
+          closedAt: null,
+          weekState: "live",
+        }
+      : null,
+    archiveWeeks: [],
+    archives: [],
+  };
+}
+
+async function getNoStudioGalleryWeekBrowser(weekId, { sort = "new", limit = 120, offset = 0 } = {}) {
+  if (String(weekId || "") !== "browser-live") {
+    return {
+      ok: true,
+      storage: "browser",
+      count: 0,
+      items: [],
+      week: null,
+      sort: String(sort || "new").toLowerCase() === "top" ? "top" : "new",
+    };
+  }
+  const home = await getNoStudioGalleryHomeBrowser({ sort, liveLimit: limit + offset });
+  const items = home.liveWeek.items.slice(offset, offset + limit);
+  return {
+    ok: true,
+    storage: "browser",
+    count: home.liveWeek.count,
+    items,
+    week: {
+      weekId: "browser-live",
+      startedAt: home.liveWeek.startedAt,
+      endsAt: null,
+      closedAt: null,
+      weekState: "live",
+    },
+    sort: home.liveWeek.sort,
+  };
+}
+
 async function saveNoStudioGalleryBrowser(body) {
   const mediaDataUrl = String(body?.mediaDataUrl || body?.pngDataUrl || body?.gifDataUrl || "").trim();
   const match = /^data:image\/(png|gif);base64,[A-Za-z0-9+/=]+$/i.exec(mediaDataUrl);
@@ -382,6 +488,41 @@ async function saveNoStudioGalleryBrowser(body) {
     ok: true,
     item: entry,
     storage: "browser",
+  };
+}
+
+async function reactNoStudioGalleryBrowser(id, reaction = "no") {
+  const entryId = String(id || "");
+  const safeReaction = String(reaction || "").trim().toLowerCase() === "yes" ? "yes" : "no";
+  const entries = await readBrowserGallery();
+  let nextItem = null;
+  const nextEntries = entries.map((entry) => {
+    if (String(entry.id) !== entryId) return entry;
+    const previous = String(entry.viewerReaction || "").trim().toLowerCase();
+    const nextNoCount = Math.max(0, Number(entry.noCount ?? entry.voteCount) || 0)
+      + (previous === "no" ? -1 : 0)
+      + (safeReaction === "no" ? 1 : 0);
+    const nextYesCount = Math.max(0, Number(entry.yesCount) || 0)
+      + (previous === "yes" ? -1 : 0)
+      + (safeReaction === "yes" ? 1 : 0);
+    nextItem = normalizeBrowserGalleryItem({
+      ...entry,
+      noCount: nextNoCount,
+      yesCount: nextYesCount,
+      voteCount: nextNoCount,
+      viewerReaction: safeReaction,
+    });
+    return nextItem;
+  });
+  if (!nextItem) {
+    throw new Error("Gallery entry not found");
+  }
+  await writeBrowserGallery(nextEntries);
+  return {
+    ok: true,
+    item: nextItem,
+    storage: "browser",
+    deduped: false,
   };
 }
 
@@ -538,8 +679,12 @@ export async function getHealth() {
 
 export async function getNoStudioConfig() {
   try {
-    return await fetchJson("/api/no-studio/config");
+    const payload = await fetchJson("/api/no-studio/config");
+    globalGalleryEnabled = payload?.globalGalleryEnabled === true;
+    sharedGalleryUnavailable = false;
+    return payload;
   } catch {
+    globalGalleryEnabled = STATIC_STUDIO_CONFIG.globalGalleryEnabled === true;
     return { ...STATIC_STUDIO_CONFIG };
   }
 }
@@ -602,19 +747,100 @@ export async function renderNoStudioNoiseGif(body) {
   }
 }
 
-export async function listNoStudioGallery({ limit = 18 } = {}) {
+export async function listNoStudioGallery({
+  limit = 18,
+  offset = 0,
+  family = null,
+  tokenId = null,
+  mediaType = null,
+  signature = null,
+  sort = "new",
+} = {}) {
   if (sharedGalleryUnavailable) {
     return listNoStudioGalleryBrowser({ limit });
   }
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (family) params.set("family", String(family));
+  if (tokenId != null) params.set("tokenId", String(tokenId));
+  if (mediaType) params.set("mediaType", String(mediaType));
+  if (signature) params.set("signature", String(signature));
+  if (sort) params.set("sort", String(sort));
+  const viewerId = getNoGalleryViewerId();
   try {
-    return await fetchJsonWithTimeout(`/api/no-studio/gallery?limit=${encodeURIComponent(String(limit))}`, {}, GALLERY_REQUEST_TIMEOUT_MS);
+    return await fetchJsonWithTimeout(`/api/no-studio/gallery?${params.toString()}`, {
+      headers: viewerId ? {
+        "x-no-gallery-anon-id": viewerId,
+      } : {},
+    }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
     if (isSharedGalleryConfigError(error)) {
       sharedGalleryUnavailable = true;
       return listNoStudioGalleryBrowser({ limit });
     }
     if (isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      sharedGalleryUnavailable = true;
       return listNoStudioGalleryBrowser({ limit });
+    }
+    throw error;
+  }
+}
+
+export async function getNoStudioGalleryHome({
+  sort = "new",
+  liveLimit = 120,
+  archiveLimit = 24,
+} = {}) {
+  if (sharedGalleryUnavailable) {
+    return getNoStudioGalleryHomeBrowser({ sort, liveLimit });
+  }
+  const params = new URLSearchParams({
+    sort: String(sort || "new"),
+    liveLimit: String(liveLimit),
+    archiveLimit: String(archiveLimit),
+  });
+  const viewerId = getNoGalleryViewerId();
+  try {
+    return await fetchJsonWithTimeout(`/api/no-studio/gallery/home?${params.toString()}`, {
+      headers: viewerId ? {
+        "x-no-gallery-anon-id": viewerId,
+      } : {},
+    }, GALLERY_REQUEST_TIMEOUT_MS);
+  } catch (error) {
+    if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      sharedGalleryUnavailable = true;
+      return getNoStudioGalleryHomeBrowser({ sort, liveLimit });
+    }
+    throw error;
+  }
+}
+
+export async function getNoStudioGalleryWeek(weekId, {
+  sort = "new",
+  limit = 120,
+  offset = 0,
+} = {}) {
+  if (sharedGalleryUnavailable) {
+    return getNoStudioGalleryWeekBrowser(weekId, { sort, limit, offset });
+  }
+  const params = new URLSearchParams({
+    sort: String(sort || "new"),
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const viewerId = getNoGalleryViewerId();
+  try {
+    return await fetchJsonWithTimeout(`/api/no-studio/gallery/week/${encodeURIComponent(String(weekId || ""))}?${params.toString()}`, {
+      headers: viewerId ? {
+        "x-no-gallery-anon-id": viewerId,
+      } : {},
+    }, GALLERY_REQUEST_TIMEOUT_MS);
+  } catch (error) {
+    if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      sharedGalleryUnavailable = true;
+      return getNoStudioGalleryWeekBrowser(weekId, { sort, limit, offset });
     }
     throw error;
   }
@@ -633,12 +859,32 @@ export async function saveNoStudioGallery(body) {
       body: JSON.stringify(body || {}),
     }, GALLERY_REQUEST_TIMEOUT_MS);
   } catch (error) {
-    if (isSharedGalleryConfigError(error)) {
+    if (isRecoverableGalleryWriteError(error)) {
       sharedGalleryUnavailable = true;
       return saveNoStudioGalleryBrowser(body || {});
     }
-    if (isUnavailableApiError(error) || isTimeoutApiError(error)) {
-      return saveNoStudioGalleryBrowser(body || {});
+    throw error;
+  }
+}
+
+export async function voteNoStudioGallery(id, reaction = "no") {
+  if (sharedGalleryUnavailable) {
+    return reactNoStudioGalleryBrowser(id, reaction);
+  }
+  const viewerId = getNoGalleryViewerId();
+  try {
+    return await fetchJsonWithTimeout("/api/no-studio/gallery/react", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        ...(viewerId ? { "x-no-gallery-anon-id": viewerId } : {}),
+      },
+      body: JSON.stringify({ id, reaction }),
+    }, GALLERY_REQUEST_TIMEOUT_MS);
+  } catch (error) {
+    if (isSharedGalleryConfigError(error) || isUnavailableApiError(error) || isTimeoutApiError(error)) {
+      sharedGalleryUnavailable = true;
+      return reactNoStudioGalleryBrowser(id, reaction);
     }
     throw error;
   }
@@ -661,6 +907,18 @@ export async function getNoStudioHistory(tokenId, { limit = 8, offset = 0, mode 
       items: [],
     };
   }
+}
+
+export async function getRecoveryFaultsConfig() {
+  return fetchJson("/api/recovery-faults/config");
+}
+
+export async function getRecoveryFaultHolder(address) {
+  return fetchJson(`/api/recovery-faults/holder/${encodeURIComponent(String(address || "").trim())}`);
+}
+
+export async function getRecoveryFaultFeature(tokenId) {
+  return fetchJson(`/api/recovery-faults/features/${encodeURIComponent(String(tokenId))}`);
 }
 
 export const getNoPaletteConfig = getNoStudioConfig;

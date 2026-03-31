@@ -12,6 +12,8 @@ const { EthereumBlockSource } = require("./lib/nopalette/blockSource");
 const { NoPaletteRarityService } = require("./lib/nopalette/rarityService");
 const { NoPaletteGenerationService } = require("./lib/nopalette/generationService");
 const { renderNoPaletteNoiseGif } = require("./lib/nopalette/imageWorker");
+const { GalleryStore } = require("./lib/galleryStore");
+const { createRecoveryFaultsService, normalizeAddress } = require("./lib/recoveryFaults");
 
 const APP_ROOT = path.resolve(__dirname, "..");
 const WEB_ROOT = path.join(APP_ROOT, "web");
@@ -26,7 +28,11 @@ const NO_STUDIO_NOISE_GIF_ROOT = path.join(RENDERS_ROOT, "no-studio-noise-gif");
 const NO_PALETTE_WORKER_PATH = path.join(APP_ROOT, "scripts", "nopalette_worker.py");
 const NO_GALLERY_ROOT = path.join(DATA_ROOT, "no-gallery");
 const NO_GALLERY_INDEX_PATH = path.join(NO_GALLERY_ROOT, "gallery.json");
+const NO_GALLERY_DB_PATH = path.join(DATA_ROOT, "no-gallery.sqlite");
 const NO_GALLERY_SCHEMA_VERSION = 3;
+const HOLDER_DISCOVERY_ROOT = path.resolve(REPO_ROOT, "..", "nopunks-site", "public", "data", "holders");
+const HOLDER_DISCOVERY_LATEST_PATH = path.join(HOLDER_DISCOVERY_ROOT, "latest.json");
+const HOLDER_DISCOVERY_HISTORY_PATH = path.join(HOLDER_DISCOVERY_ROOT, "history.json");
 
 const FEATURED_IDS = [7804, 0, 52, 9999, 214, 604, 1337, 420, 69, 8888];
 const LEGACY_TOOL_ROUTES = new Set(["/tools/no-palette", "/tools/no-generate", "/tools/gif-lab", "/tools/tcg-forge"]);
@@ -216,6 +222,7 @@ function contentType(filePath) {
   if (lower.endsWith(".html")) return "text/html; charset=utf-8";
   if (lower.endsWith(".css")) return "text/css; charset=utf-8";
   if (lower.endsWith(".js")) return "application/javascript; charset=utf-8";
+  if (lower.endsWith(".mjs")) return "application/javascript; charset=utf-8";
   if (lower.endsWith(".json")) return "application/json; charset=utf-8";
   if (lower.endsWith(".txt")) return "text/plain; charset=utf-8";
   if (lower.endsWith(".png")) return "image/png";
@@ -233,6 +240,10 @@ function sendJson(res, statusCode, payload) {
     "cache-control": "no-store",
   });
   res.end(body);
+}
+
+function requestViewerId(req) {
+  return String(req.headers["x-no-gallery-anon-id"] || "").trim().slice(0, 128);
 }
 
 function parseBody(req) {
@@ -640,12 +651,21 @@ function saveNoGalleryEntry({
   return normalizeGalleryEntry(nextEntry, useNoStudioPrefix);
 }
 
-function createServer({ port = Number(process.env.PORT) || 8792, host = process.env.HOST || "127.0.0.1" } = {}) {
+function createServer({
+  port = Number(process.env.PORT) || 8792,
+  host = process.env.HOST || "127.0.0.1",
+  galleryRoot = NO_GALLERY_ROOT,
+  galleryDbPath = NO_GALLERY_DB_PATH,
+  galleryIndexPath = NO_GALLERY_INDEX_PATH,
+} = {}) {
   loadDataset();
   fs.mkdirSync(DATA_ROOT, { recursive: true });
   fs.mkdirSync(NO_PALETTE_OUTPUT_ROOT, { recursive: true });
   fs.mkdirSync(NO_STUDIO_NOISE_GIF_ROOT, { recursive: true });
-  fs.mkdirSync(NO_GALLERY_ROOT, { recursive: true });
+  fs.mkdirSync(galleryRoot, { recursive: true });
+  const globalGalleryEnabled = process.env.GLOBAL_GALLERY_ENABLED !== "0";
+  const galleryRateLimitWindowMs = clampInt(process.env.GALLERY_RATE_LIMIT_WINDOW_MS || 60_000, 1_000, 3_600_000);
+  const galleryRateLimitMax = clampInt(process.env.GALLERY_RATE_LIMIT_MAX || 18, 1, 500);
 
   const noPaletteDb = new NoPaletteDatabase({
     dbPath: path.join(DATA_ROOT, "no-palette.sqlite"),
@@ -662,6 +682,51 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
     workerScriptPath: NO_PALETTE_WORKER_PATH,
     outputRoot: NO_PALETTE_OUTPUT_ROOT,
   });
+  const galleryStore = globalGalleryEnabled
+    ? new GalleryStore({
+        dbPath: galleryDbPath,
+        galleryRoot,
+      })
+    : null;
+  const recoveryFaults = createRecoveryFaultsService({
+    traitDbPath: TRAIT_DB_PATH,
+    transparentRoot: TRANSPARENT_ROOT,
+    holderSnapshotPath: HOLDER_DISCOVERY_LATEST_PATH,
+    holderHistoryPath: HOLDER_DISCOVERY_HISTORY_PATH,
+  });
+  if (galleryStore && fs.existsSync(galleryIndexPath)) {
+    galleryStore.migrateJsonIndex({
+      jsonPath: galleryIndexPath,
+      useNoStudioPrefix: true,
+    });
+  }
+  const galleryWriteLimits = new Map();
+
+  function requestIp(req) {
+    return String(
+      req.headers["x-forwarded-for"]
+        || req.headers["x-real-ip"]
+        || req.socket?.remoteAddress
+        || "unknown"
+    ).split(",")[0].trim() || "unknown";
+  }
+
+  function enforceGalleryWriteRateLimit(req) {
+    const key = requestIp(req);
+    const now = Date.now();
+    const record = galleryWriteLimits.get(key);
+    if (!record || (now - record.windowStart) >= galleryRateLimitWindowMs) {
+      galleryWriteLimits.set(key, { windowStart: now, count: 1 });
+      return;
+    }
+    if (record.count >= galleryRateLimitMax) {
+      const error = new Error("No-Gallery save rate limit exceeded");
+      error.statusCode = 429;
+      throw error;
+    }
+    record.count += 1;
+    galleryWriteLimits.set(key, record);
+  }
 
   function rewriteNoStudioUrls(value) {
     if (typeof value === "string") {
@@ -676,7 +741,7 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
     return value;
   }
 
-  const server = http.createServer(async (req, res) => {
+  async function handleRequest(req, res) {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
       const pathname = (url.pathname || "/").replace(/\/+$/, "") || "/";
@@ -694,6 +759,46 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           hasNoPaletteDb: fs.existsSync(path.join(DATA_ROOT, "no-palette.sqlite")) || fs.existsSync(path.join(DATA_ROOT, "no-palette.json")),
           now: new Date().toISOString(),
         });
+      }
+
+      if (method === "GET" && pathname === "/api/recovery-faults/config") {
+        return sendJson(res, 200, recoveryFaults.getConfig());
+      }
+
+      if (method === "GET" && pathname.startsWith("/api/recovery-faults/holder/")) {
+        const address = normalizeAddress(pathname.slice("/api/recovery-faults/holder/".length));
+        if (!address) return sendJson(res, 400, { ok: false, error: "Invalid address" });
+        const config = recoveryFaults.getConfig();
+        const holder = recoveryFaults.getHolder(address);
+        if (!holder) {
+          return sendJson(res, 404, {
+            ok: false,
+            error: "Holder not found in snapshot",
+            address,
+            balance: 0,
+            tokenIds: [],
+            holderSnapshot: config.holderSnapshot,
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          address,
+          balance: holder.balance,
+          tokenIds: holder.tokenIds,
+          lastActivity: holder.lastActivity,
+          holderSnapshot: config.holderSnapshot,
+          claimAuthority: {
+            mode: "live-ownerOf",
+            sourceCollection: config.contracts.v2,
+            note: "Snapshot data is for holder discovery only. Claim eligibility is enforced onchain by ownerOf(tokenId).",
+          },
+        });
+      }
+
+      if (method === "GET" && pathname.startsWith("/api/recovery-faults/features/")) {
+        const id = toId(pathname.slice("/api/recovery-faults/features/".length));
+        if (id === null) return sendJson(res, 400, { ok: false, error: "Invalid tokenId" });
+        return sendJson(res, 200, recoveryFaults.getFeaturePack(id));
       }
 
       if (method === "GET" && pathname === "/api/search") {
@@ -718,35 +823,61 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           noMinimalismVisibilityModes: ["exact", "soft", "hard"],
           machineDrawerEnabled: true,
           noGalleryAvailable: true,
+          globalGalleryEnabled,
           ...config,
         });
       }
 
-      if (method === "GET" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
-        const limit = clampInt(url.searchParams.get("limit") || 18, 1, 60);
-        const useNoStudioPrefix = pathname.startsWith("/api/no-studio/");
-        const entries = readNoGalleryEntries();
-        let mutated = false;
-        for (const entry of entries) {
-          const current = sanitizePalette(entry && (entry.palette || entry.paletteHexes || []));
-          const inferred = inferPaletteFromGalleryFile(entry && entry.fileName);
-          if (inferred.length && inferred.length > current.length) {
-            entry.palette = inferred;
-            mutated = true;
-          }
+      if (method === "GET" && pathname === "/api/no-studio/gallery/home") {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
         }
-        if (mutated) {
-          writeNoGalleryEntries(entries);
-        }
-        const items = entries
-          .filter((entry) => Number(entry?.schemaVersion) === NO_GALLERY_SCHEMA_VERSION)
-          .slice(0, limit)
-          .map((entry) => normalizeGalleryEntry(entry, useNoStudioPrefix));
-        return sendJson(res, 200, {
-          ok: true,
-          count: items.length,
-          items,
+        const payload = galleryStore.getHome({
+          sort: url.searchParams.get("sort") || "new",
+          viewerId: requestViewerId(req),
+          liveLimit: clampInt(url.searchParams.get("liveLimit") || 120, 1, 120),
+          archiveLimit: clampInt(url.searchParams.get("archiveLimit") || 24, 1, 52),
+          useNoStudioPrefix: true,
         });
+        return sendJson(res, 200, payload);
+      }
+
+      if (method === "GET" && pathname.startsWith("/api/no-studio/gallery/week/")) {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
+        }
+        const weekId = decodeURIComponent(pathname.slice("/api/no-studio/gallery/week/".length));
+        try {
+          const payload = galleryStore.getWeekDetail(weekId, {
+            sort: url.searchParams.get("sort") || "new",
+            limit: clampInt(url.searchParams.get("limit") || 120, 1, 120),
+            offset: clampInt(url.searchParams.get("offset") || 0, 0, 100000),
+            viewerId: requestViewerId(req),
+            useNoStudioPrefix: true,
+          });
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          return sendJson(res, error.statusCode || 500, { ok: false, error: error.message || "Gallery week unavailable" });
+        }
+      }
+
+      if (method === "GET" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
+        }
+        const useNoStudioPrefix = pathname.startsWith("/api/no-studio/");
+        const payload = galleryStore.listEntries({
+          limit: clampInt(url.searchParams.get("limit") || 18, 1, 120),
+          offset: clampInt(url.searchParams.get("offset") || 0, 0, 100000),
+          family: url.searchParams.get("family") || null,
+          tokenId: url.searchParams.get("tokenId") || null,
+          mediaType: url.searchParams.get("mediaType") || null,
+          signature: url.searchParams.get("signature") || null,
+          sort: url.searchParams.get("sort") || "new",
+          viewerId: requestViewerId(req),
+          useNoStudioPrefix,
+        });
+        return sendJson(res, 200, payload);
       }
 
       if ((method === "GET" || method === "HEAD") && (pathname.startsWith("/api/no-palette/gallery/files/") || pathname.startsWith("/api/no-studio/gallery/files/"))) {
@@ -754,8 +885,8 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
         if (!/^[a-zA-Z0-9._-]+\.(png|gif)$/i.test(fileName)) {
           return sendJson(res, 400, { ok: false, error: "Invalid gallery file name" });
         }
-        const filePath = path.join(NO_GALLERY_ROOT, fileName);
-        if (!filePath.startsWith(NO_GALLERY_ROOT) || !fs.existsSync(filePath)) {
+        const filePath = path.join(galleryRoot, fileName);
+        if (!filePath.startsWith(galleryRoot) || !fs.existsSync(filePath)) {
           return sendJson(res, 404, { ok: false, error: "Gallery file not found" });
         }
         const lower = fileName.toLowerCase();
@@ -895,7 +1026,7 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
         if (!grain || !grain.enabled || !(Number(grain.amount) > 0)) {
           return sendJson(res, 400, { ok: false, error: "Animated GIF export requires active grain" });
         }
-        const occupiedPixels = Array.isArray(body && body.occupiedPixels) ? body.occupiedPixels.map((v) => String(v)) : [];
+        const noiseMask = Array.isArray(body && body.noiseMask) ? body.noiseMask.map((v) => String(v)) : [];
         const nonce = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
         const fileName = `no-studio-${id}-${nonce}.gif`;
         const outputPath = path.join(NO_STUDIO_NOISE_GIF_ROOT, fileName);
@@ -907,7 +1038,7 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
           frames: 12,
           durationMs: 1000,
           rgba24Bytes: rgba24B64,
-          occupiedPixels,
+          noiseMask,
           grain,
         });
 
@@ -928,29 +1059,61 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
       }
 
       if (method === "POST" && (pathname === "/api/no-palette/gallery" || pathname === "/api/no-studio/gallery")) {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
+        }
+        enforceGalleryWriteRateLimit(req);
         const body = await parseBody(req);
         const id = toId(body && body.tokenId);
         if (id === null) return sendJson(res, 400, { ok: false, error: "Invalid tokenId" });
         const record = loadDataset().byId.get(id);
         if (!record) return sendJson(res, 404, { ok: false, error: "NoPunk not found" });
-        const entry = saveNoGalleryEntry({
+        const payload = galleryStore.saveEntry({
           tokenId: id,
           mediaDataUrl: body && body.mediaDataUrl,
           pngDataUrl: body && body.pngDataUrl,
           gifDataUrl: body && body.gifDataUrl,
-          label: body && body.label,
+          mediaType: body && body.mediaType,
           family: body && body.family,
           rolePair: body && body.rolePair,
-          signatureHandle: body && body.signatureHandle,
-          signature: body && body.signature,
-          twitterHandle: body && body.twitterHandle,
+          signatureHandle: body && sanitizeSignatureHandle(body.signatureHandle || body.signature || body.twitterHandle),
           palette: body && body.palette,
           paletteHexes: body && body.paletteHexes,
-        }, pathname.startsWith("/api/no-studio/"));
-        return sendJson(res, 200, {
-          ok: true,
-          item: entry,
+          provenance: body && body.provenance,
+        }, {
+          useNoStudioPrefix: pathname.startsWith("/api/no-studio/"),
         });
+        return sendJson(res, 200, payload);
+      }
+
+      if (method === "POST" && pathname === "/api/no-studio/gallery/react") {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
+        }
+        const body = await parseBody(req);
+        try {
+          const payload = galleryStore.reactEntry(body && body.id, requestViewerId(req), body && body.reaction, {
+            useNoStudioPrefix: true,
+          });
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          return sendJson(res, error.statusCode || 500, { ok: false, error: error.message || "Reaction failed" });
+        }
+      }
+
+      if (method === "POST" && pathname === "/api/no-studio/gallery/vote") {
+        if (!galleryStore) {
+          return sendJson(res, 503, { ok: false, error: "Shared No-Gallery is not configured" });
+        }
+        const body = await parseBody(req);
+        try {
+          const payload = galleryStore.reactEntry(body && body.id, requestViewerId(req), body && body.reaction ? body.reaction : "no", {
+            useNoStudioPrefix: true,
+          });
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          return sendJson(res, error.statusCode || 500, { ok: false, error: error.message || "Vote failed" });
+        }
       }
 
       if (method === "GET" && pathname.startsWith("/api/punk/")) {
@@ -998,17 +1161,22 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
       }
       return sendJson(res, 404, { ok: false, error: "Not found" });
     } catch (error) {
-      return sendJson(res, 500, {
+      return sendJson(res, error && error.statusCode ? error.statusCode : 500, {
         ok: false,
         error: error && error.message ? error.message : "Internal server error",
       });
     }
+  }
+
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res);
   });
 
   return {
     host,
     port,
     server,
+    handleRequest,
     noPalette,
     noPaletteDb,
     listen() {
@@ -1019,7 +1187,11 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
         };
         const onListening = () => {
           server.off("error", onError);
-          resolve({ host, port });
+          const address = server.address();
+          resolve({
+            host,
+            port: address && typeof address === "object" ? address.port : port,
+          });
         };
         server.once("error", onError);
         server.once("listening", onListening);
@@ -1028,6 +1200,10 @@ function createServer({ port = Number(process.env.PORT) || 8792, host = process.
     },
     close() {
       noPaletteDb.close();
+      if (galleryStore) galleryStore.close();
+      if (!server.listening) {
+        return Promise.resolve();
+      }
       return new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });

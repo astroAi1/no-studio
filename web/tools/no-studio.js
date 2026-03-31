@@ -4,6 +4,7 @@ import {
   renderNoStudioNoiseGif,
   saveNoStudioGallery,
   searchPunks,
+  voteNoStudioGallery,
 } from "../api.js";
 import { mountPunkPicker } from "../components/punk-picker.js";
 import {
@@ -25,6 +26,14 @@ import {
 import { deriveNoMinimalismPair } from "../lib/studio-signature.js";
 import { exportCanvasPng } from "../lib/download.js";
 import { encodeIndexedGif, quantizeImageDataToRgb332 } from "../lib/gif-encode.js";
+import { buildFamilyVariantRailPage, createEmptyRailState, railContextSignature, DEFAULT_RAIL_PAGE_SIZE } from "../lib/family-variant-rail.mjs";
+import {
+  buildGalleryProvenance,
+  makePaletteSignature,
+  makeCuratedPaletteSignature,
+  makeSourcePaletteSignature,
+  sanitizeCuratedPaletteMap,
+} from "../lib/gallery-provenance.mjs";
 
 function escapeHtml(v) {
   return String(v || "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
@@ -199,18 +208,56 @@ function ensureDistinctHex(hex, used, { floor = -1, forbidden = null } = {}) {
   return current;
 }
 
-const FAMILY_IDS = ["mono", "noir", "warhol", "acid", "pastel"];
+const FAMILY_IDS = ["mono", "chrome", "warhol", "acid", "pastel"];
 const FAMILY_LABELS = {
   mono: "Mono",
-  noir: "Noir",
+  chrome: "Chrome",
   warhol: "Pop",
   acid: "Acid",
   pastel: "Pastel",
 };
 const POP_SHEET_STYLE_POSTER = "poster-grid";
 const POP_SHEET_STYLE_SCREENPRINT = "screenprint";
+const GRID_FRAME_TONES = {
+  black: {
+    label: "Black",
+    frameFill: "#040404",
+    frameStroke: "rgba(255,255,255,0.18)",
+  },
+  white: {
+    label: "White",
+    frameFill: "#F4F1EA",
+    frameStroke: "rgba(32,24,16,0.18)",
+  },
+  cream: {
+    label: "Off White",
+    frameFill: "#EBD8B8",
+    frameStroke: "rgba(28,20,12,0.35)",
+  },
+  stone: {
+    label: "Stone",
+    frameFill: "#C9C1B6",
+    frameStroke: "rgba(34,28,24,0.28)",
+  },
+};
 const BRAND_ROLE_BG = "#000000";
 const BRAND_ROLE_FG = "#040404";
+const POP_POSTER_BACKGROUNDS = [
+  "#F6E7C8",
+  "#FF6B6B",
+  "#FFD84A",
+  "#67D6FF",
+  "#FF9F1C",
+  "#7EE7C9",
+  "#FF5EA8",
+  "#B4F25B",
+];
+const POP_SCREENPRINT_BACKGROUNDS = [
+  "#F6E7C8",
+  "#EFD9B4",
+  "#F2E6D0",
+  "#E9D2BF",
+];
 const FAMILY_PROFILES = {
   mono: {
     bgSat: [0.04, 0.16],
@@ -222,15 +269,15 @@ const FAMILY_PROFILES = {
     quantMin: 3,
     quantMax: 7,
   },
-  noir: {
-    bgSat: [0.01, 0.08],
-    bgLight: [0.015, 0.07],
-    hueShift: 10,
-    sat: [0.01, 0.14],
-    light: [0.08, 0.34],
-    accentLift: 0.08,
-    quantMin: 3,
-    quantMax: 5,
+  chrome: {
+    bgSat: [0.05, 0.22],
+    bgLight: [0.34, 0.72],
+    hueShift: 36,
+    sat: [0.05, 0.34],
+    light: [0.18, 0.92],
+    accentLift: 0.1,
+    quantMin: 4,
+    quantMax: 7,
   },
   warhol: {
     bgSat: [0.62, 0.98],
@@ -307,17 +354,26 @@ function createDefaultGlobalModifiers() {
     traitFocus: 54,
     paletteDrift: 28,
     grainAmount: 28,
-    grainTarget: "background",
   };
 }
 
 function createDefaultFamilyModifiers() {
   return {
     mono: { hueDrift: 8, stepCompression: 56 },
-    noir: { shadowDepth: 72, accentGate: 38 },
+    chrome: { shimmer: 70, polish: 62 },
     warhol: { flatness: 70, panelDivergence: 62 },
     acid: { clashAngle: 132, corrosion: 58 },
     pastel: { powderSoftness: 66, airLift: 60 },
+  };
+}
+
+function createInitialVariantRailByFamily() {
+  return {
+    mono: createEmptyRailState(),
+    chrome: createEmptyRailState(),
+    warhol: createEmptyRailState(),
+    acid: createEmptyRailState(),
+    pastel: createEmptyRailState(),
   };
 }
 
@@ -335,6 +391,12 @@ export function mountNoStudioTool(root, shellApi = {}) {
     displayCanvas: q("display-canvas"),
     canvasEmpty: q("canvas-empty"),
     stageTitle: q("stage-title"),
+    stageColorPreview: q("stage-color-preview"),
+    stageColorInput: q("stage-color-input"),
+    stageColorHex: q("stage-color-hex"),
+    stagePaintTargetRail: q("stage-paint-target-rail"),
+    startModeRail: q("start-mode-rail"),
+    openDockColors: q("open-dock-colors"),
     dockScrim: q("dock-scrim"),
     sidebarHero: q("sidebar-hero"),
     sidebar: q("sidebar"),
@@ -351,13 +413,22 @@ export function mountNoStudioTool(root, shellApi = {}) {
     colorPreview: q("color-preview"), colorHex: q("color-hex"),
     paletteGrid: q("palette-grid"),
     paletteCurationReadout: q("palette-curation-readout"),
+    wildnessSlider: q("wildness-slider"),
+    wildnessValue: q("wildness-value"),
+    pinActiveColor: q("pin-active-color"),
+    clearPalettePins: q("clear-palette-pins"),
     curationMapActive: q("curation-map-active"),
     curationClearMapping: q("curation-clear-mapping"),
     curationApply: q("curation-apply"),
     curationResetAll: q("curation-reset-all"),
+    restoreLastSession: q("restore-last-session"),
     surpriseBtn: q("surprise-btn"),
     heroNoMinimal: q("hero-no-minimal"),
     heroRolePair: q("hero-role-pair"),
+    paintTargetRail: q("paint-target-rail"),
+    showMask: q("show-mask"),
+    clearMask: q("clear-mask"),
+    sourceOverlayToggle: q("source-overlay-toggle"),
     presetList: q("preset-list"),
     dockAdvanced: q("dock-advanced"),
     globalToneCount: q("global-tone-count"),
@@ -375,6 +446,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     noiseAmount: q("noise-amount"),
     noiseAmountValue: q("noise-amount-value"),
     applyNoise: q("apply-noise"),
+    clearRoleGrain: q("clear-role-grain"),
     exportPng: q("export-png"),
     exportGif: q("export-gif"),
     saveGalleryPng: q("save-gallery-png"),
@@ -408,23 +480,42 @@ export function mountNoStudioTool(root, shellApi = {}) {
     gallerySaving: false,
     gallerySavingKind: null,
     galleryMessage: "",
+    galleryStorage: "sqlite",
     activeTool: "pointer",
+    activePaintTarget: "content",
     activePresetTab: "mono",
     noMinimalDeltaMode: "exact",
     useActiveBg: false,
-    activeNoiseTarget: "background",
     noiseAmount: 28,
     noisePass: 0,
+    showNoiseMask: false,
+    sourceOverlayVisible: false,
     lastReductionMode: "none",
     globalModifiers: createDefaultGlobalModifiers(),
     familyModifiers: createDefaultFamilyModifiers(),
     variantByFamily: {
       mono: null,
-      noir: null,
+      chrome: null,
       warhol: null,
       acid: null,
       pastel: null,
     },
+    localAcceptedVariantsByFamily: {
+      mono: [],
+      chrome: [],
+      warhol: [],
+      acid: [],
+      pastel: [],
+    },
+    variantRailByFamily: createInitialVariantRailByFamily(),
+    variantRailLocks: {
+      background: false,
+      accentBias: false,
+      curatedMap: false,
+    },
+    activeStudioVariant: null,
+    activeStudioProvenance: null,
+    globalGalleryEnabled: false,
     sessionSignatures: new Set(),
     sessionSignatureOrder: [],
     outputSignatures: new Set(),
@@ -435,6 +526,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     sourcePaletteHexes: [],
     sourceRoleByHex: new Map(),
     curatedPaletteMap: {},
+    palettePins: [],
     curationSourceHex: null,
     ditherPalette: [
       { r: 255, g: 255, b: 255 },
@@ -443,9 +535,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     activeColor: { h: 0, s: 0, l: 100 },
     activeColorHex: "#FFFFFF",
     gallerySignature: "",
+    startMode: "full",
     noMinimalPreviewPair: null,
-    noFieldLastFamily: "noir",
-    popSheetLayout: "2x2",
+    noFieldLastFamily: "chrome",
+    popSheetLayout: "4x4",
+    gridFrameTone: "cream",
     popSheetStyle: POP_SHEET_STYLE_POSTER,
     popSheetBuildNonce: 0,
     lastPopSheetPanelSignatures: [],
@@ -455,28 +549,35 @@ export function mountNoStudioTool(root, shellApi = {}) {
   // ── Session persistence ──────────────────────────────────────
 
   const SESSION_KEY = "no-studio-session";
+  let pendingCanvasSession = null;
+  let restoreCanvasSession = null;
+  let restoreSessionArmed = false;
 
   function persistSession() {
     try {
-      const data = {
-        selectedId: state.selected?.id ?? null,
+      const data = canvas.exportSessionState({
+        selectedTokenId: state.selected?.id ?? null,
         activePresetTab: state.activePresetTab,
         activeColor: state.activeColor,
         activeColorHex: state.activeColorHex,
         noMinimalDeltaMode: state.noMinimalDeltaMode,
         useActiveBg: state.useActiveBg,
+        activePaintTarget: state.activePaintTarget,
+        showNoiseMask: state.showNoiseMask,
+        sourceOverlayVisible: state.sourceOverlayVisible,
         globalModifiers: state.globalModifiers,
         familyModifiers: state.familyModifiers,
         popSheetLayout: state.popSheetLayout,
+        gridFrameTone: state.gridFrameTone,
         popSheetStyle: state.popSheetStyle,
+        startMode: state.startMode,
+        selectedFamily: state.activePresetTab,
         gallerySignature: normalizeSignatureHandle(els.gallerySignature?.value || state.gallerySignature || ""),
         curatedPaletteMap: state.curatedPaletteMap,
+        palettePins: state.palettePins,
         curationSourceHex: state.curationSourceHex,
-      };
-      if (state.selected && canvas) {
-        const imageData = canvas.exportImageData();
-        data.canvasBuffer = encodeRgba24B64(imageData.data);
-      }
+        variantRailLocks: state.variantRailLocks,
+      });
       localStorage.setItem(SESSION_KEY, JSON.stringify(data));
     } catch { /* quota or private mode — ignore */ }
   }
@@ -487,6 +588,27 @@ export function mountNoStudioTool(root, shellApi = {}) {
       if (!raw) return null;
       return JSON.parse(raw);
     } catch { return null; }
+  }
+
+  function isRestorableCanvasSession(session) {
+    return Boolean(
+      session
+      && Array.isArray(session.roleGrid)
+      && Array.isArray(session.contentGrid)
+      && session.roleGrid.length
+      && session.contentGrid.length,
+    );
+  }
+
+  function syncRestoreSessionButton() {
+    if (!els.restoreLastSession) return;
+    const visible = isRestorableCanvasSession(restoreCanvasSession);
+    els.restoreLastSession.hidden = !visible;
+    if (visible && restoreCanvasSession?.selectedTokenId != null) {
+      els.restoreLastSession.textContent = `Restore Last Session · #${Number(restoreCanvasSession.selectedTokenId) || 0}`;
+      return;
+    }
+    els.restoreLastSession.textContent = "Restore Last Session";
   }
 
   const mobileDockQuery = window.matchMedia("(max-width: 900px)");
@@ -534,8 +656,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     },
     onColorPick: (hex) => setActiveColorFromHex(hex),
     onChange: () => {
+      invalidateVariantRailState();
       updateUndoRedoButtons();
       updatePaletteGrid();
+      renderHeroRolePair();
+      renderNoiseTargetRail();
       updateExportButtons();
       persistSession();
     },
@@ -672,13 +797,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
         sourcePalette,
         excludeActiveHex,
       });
-      const preset = family === "noir"
-        ? {
-            ...basePreset,
-            noirScheme: pickOne(NOIR_COLOR_SCHEMES)?.id || "classic-noir",
-            noirPhase: Math.random(),
-          }
-        : basePreset;
+      const preset = basePreset;
       if (!fallback) fallback = preset;
       const signature = makeVariantSessionSignature(family, preset);
       if (!state.sessionSignatures.has(signature)) {
@@ -702,7 +821,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const label = FAMILY_LABELS[tabId] || "Studio";
     const kicker = root.querySelector("[data-role=\"deck-family-kicker\"]");
     if (kicker) kicker.textContent = label;
-    setTopbarStatus(`${label} armed · original-source rerender`);
+    setTopbarStatus(`${label} armed · live canvas launchpad`);
     persistSession();
   }
 
@@ -717,7 +836,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     syncColorUI();
     renderHeroRolePair();
     canvas.setActiveColorHex(normalizedHex);
-    renderPresetList();
     updatePaletteGrid();
   }
 
@@ -730,8 +848,6 @@ export function mountNoStudioTool(root, shellApi = {}) {
     syncColorUI();
     renderHeroRolePair();
     canvas.setActiveColor(rgb.r, rgb.g, rgb.b);
-    renderPresetList();
-    updatePaletteGrid();
   }
 
   function syncColorUI() {
@@ -748,6 +864,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.litValue.textContent = `${state.activeColor.l}%`;
     els.colorPreview.style.background = hex;
     els.colorHex.value = hex;
+    if (els.stageColorPreview) els.stageColorPreview.style.background = hex;
+    if (els.stageColorInput) els.stageColorInput.value = hex.toLowerCase();
+    if (els.stageColorHex) els.stageColorHex.value = hex;
   }
 
   els.hueSlider.addEventListener("input", onColorSliderInput);
@@ -758,8 +877,22 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!hex.startsWith("#")) hex = "#" + hex;
     if (/^#[0-9a-fA-F]{6}$/.test(hex)) setActiveColorFromHex(hex);
   });
+  els.stageColorInput?.addEventListener("input", () => {
+    setActiveColorFromHex(els.stageColorInput.value);
+    persistSession();
+  });
+  els.stageColorHex?.addEventListener("change", () => {
+    let hex = els.stageColorHex.value.trim();
+    if (!hex.startsWith("#")) hex = `#${hex}`;
+    if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+      setActiveColorFromHex(hex);
+      persistSession();
+    }
+  });
 
   syncColorUI();
+  canvas.setActiveColorHex(state.activeColorHex);
+  canvas.setPaintTarget(state.activePaintTarget);
 
   function clampPercent(value) {
     return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
@@ -771,9 +904,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     state.globalModifiers.traitFocus = clampPercent(state.globalModifiers.traitFocus);
     state.globalModifiers.paletteDrift = clampPercent(state.globalModifiers.paletteDrift);
     state.globalModifiers.grainAmount = clampPercent(state.globalModifiers.grainAmount);
-    state.globalModifiers.grainTarget = state.globalModifiers.grainTarget || "background";
     state.noiseAmount = state.globalModifiers.grainAmount;
-    state.activeNoiseTarget = state.globalModifiers.grainTarget;
 
     if (els.globalToneCount) els.globalToneCount.value = String(state.globalModifiers.toneCount);
     if (els.globalToneCountValue) els.globalToneCountValue.textContent = String(state.globalModifiers.toneCount);
@@ -783,6 +914,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (els.globalTraitFocusValue) els.globalTraitFocusValue.textContent = `${state.globalModifiers.traitFocus}%`;
     if (els.globalPaletteDrift) els.globalPaletteDrift.value = String(state.globalModifiers.paletteDrift);
     if (els.globalPaletteDriftValue) els.globalPaletteDriftValue.textContent = `${state.globalModifiers.paletteDrift}%`;
+    if (els.wildnessSlider) els.wildnessSlider.value = String(state.globalModifiers.paletteDrift);
+    if (els.wildnessValue) els.wildnessValue.textContent = `${state.globalModifiers.paletteDrift}%`;
     if (els.noiseAmount) els.noiseAmount.value = String(state.globalModifiers.grainAmount);
     if (els.noiseAmountValue) els.noiseAmountValue.textContent = `${state.globalModifiers.grainAmount}%`;
   }
@@ -800,9 +933,9 @@ export function mountNoStudioTool(root, shellApi = {}) {
         { key: "hueDrift", label: "Hue Drift", min: 0, max: 20, unit: "°", help: "Controls monochrome hue wandering." },
         { key: "stepCompression", label: "Step Compression", min: 0, max: 100, unit: "%", help: "Quantizes tonal ladder for harder mono bands." },
       ],
-      noir: [
-        { key: "shadowDepth", label: "Shadow Depth", min: 0, max: 100, unit: "%", help: "Pushes black floor density and concealment." },
-        { key: "accentGate", label: "Accent Gate", min: 0, max: 100, unit: "%", help: "Limits bright accents to fewer trait regions." },
+      chrome: [
+        { key: "shimmer", label: "Shimmer", min: 0, max: 100, unit: "%", help: "Pushes brighter metallic lift through the palette." },
+        { key: "polish", label: "Polish", min: 0, max: 100, unit: "%", help: "Sharpens cool-body contrast against candy glints." },
       ],
       warhol: [
         { key: "flatness", label: "Flatness", min: 0, max: 100, unit: "%", help: "Flattens light bands for graphic panel impact." },
@@ -835,6 +968,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.globalToneCount.addEventListener("input", () => {
       state.globalModifiers.toneCount = Math.max(2, Math.min(8, Math.round(Number(els.globalToneCount.value) || 5)));
       syncGlobalModifierUI();
+      invalidateVariantRailState();
       scheduleVariantPanelRender();
     });
   }
@@ -842,6 +976,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.globalContrast.addEventListener("input", () => {
       state.globalModifiers.contrast = clampPercent(els.globalContrast.value);
       syncGlobalModifierUI();
+      invalidateVariantRailState();
       scheduleVariantPanelRender();
     });
   }
@@ -849,6 +984,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.globalTraitFocus.addEventListener("input", () => {
       state.globalModifiers.traitFocus = clampPercent(els.globalTraitFocus.value);
       syncGlobalModifierUI();
+      invalidateVariantRailState();
       scheduleVariantPanelRender();
     });
   }
@@ -856,7 +992,17 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.globalPaletteDrift.addEventListener("input", () => {
       state.globalModifiers.paletteDrift = clampPercent(els.globalPaletteDrift.value);
       syncGlobalModifierUI();
+      invalidateVariantRailState();
       scheduleVariantPanelRender();
+    });
+  }
+  if (els.wildnessSlider) {
+    els.wildnessSlider.addEventListener("input", () => {
+      state.globalModifiers.paletteDrift = clampPercent(els.wildnessSlider.value);
+      syncGlobalModifierUI();
+      invalidateVariantRailState();
+      scheduleVariantPanelRender();
+      persistSession();
     });
   }
 
@@ -870,8 +1016,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function renderHeroRolePair() {
     if (!els.heroRolePair) return;
-    const pair = ensureNoMinimalPreviewPair();
-    els.heroRolePair.textContent = `BG ${pair.background} → FG ${pair.figure} · ${state.noMinimalDeltaMode}`;
+    const livePair = state.selected ? canvas.getGlobalRolePair() : null;
+    const pair = livePair
+      ? { background: livePair.background, figure: livePair.outline }
+      : ensureNoMinimalPreviewPair();
+    els.heroRolePair.textContent = `BG ${pair.background} → FG ${pair.figure} · global +4 rule`;
   }
 
   function renderNoMinimalModeRail() {
@@ -881,23 +1030,56 @@ export function mountNoStudioTool(root, shellApi = {}) {
     });
   }
 
+  function renderPaintTargetRail() {
+    const rails = [els.paintTargetRail, els.stagePaintTargetRail].filter(Boolean);
+    rails.forEach((rail) => {
+      rail.querySelectorAll("[data-paint-target]").forEach((btn) => {
+        btn.classList.toggle("is-active", btn.dataset.paintTarget === state.activePaintTarget);
+      });
+    });
+  }
+
   function renderNoiseTargetRail() {
     if (!els.noiseTargetRail) return;
+    const targets = canvas.getNoiseRoleTargets();
     els.noiseTargetRail.querySelectorAll("[data-noise-target]").forEach((btn) => {
-      btn.classList.toggle("is-active", btn.dataset.noiseTarget === state.activeNoiseTarget);
+      const key = btn.dataset.noiseTarget || "";
+      btn.classList.toggle("is-active", Boolean(targets[key]));
+    });
+  }
+
+  function syncMaskUi() {
+    if (els.showMask) {
+      els.showMask.classList.toggle("is-active", state.showNoiseMask);
+      els.showMask.textContent = `Show Mask · ${state.showNoiseMask ? "On" : "Off"}`;
+    }
+    if (els.sourceOverlayToggle) {
+      els.sourceOverlayToggle.classList.toggle("is-active", state.sourceOverlayVisible);
+      els.sourceOverlayToggle.textContent = `Show Source Overlay · ${state.sourceOverlayVisible ? "On" : "Off"}`;
+    }
+  }
+
+  function renderStartModeRail() {
+    if (!els.startModeRail) return;
+    els.startModeRail.querySelectorAll("[data-start-mode]").forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.startMode === state.startMode);
     });
   }
 
   els.activeBgToggle?.addEventListener("click", () => {
     state.useActiveBg = !state.useActiveBg;
     syncActiveBgToggle();
-    setTopbarStatus(state.useActiveBg ? "All families use active color as background anchor" : "Families use machine-picked background anchors");
+    invalidateVariantRailState();
+    setTopbarStatus(state.useActiveBg ? "All families use active color as background anchor" : "Families use family-picked background anchors");
   });
 
   syncActiveBgToggle();
   renderHeroRolePair();
   renderNoMinimalModeRail();
+  renderPaintTargetRail();
   renderNoiseTargetRail();
+  renderStartModeRail();
+  syncMaskUi();
 
   els.noMinimalModeRail?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-minimal-mode]");
@@ -906,17 +1088,101 @@ export function mountNoStudioTool(root, shellApi = {}) {
     refreshNoMinimalPreviewPair();
     renderNoMinimalModeRail();
     renderHeroRolePair();
+    invalidateVariantRailState();
     renderPresetList();
     setTopbarStatus(`No-Minimalism ${state.noMinimalDeltaMode} twin · world armed`);
+  });
+
+  els.paintTargetRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-paint-target]");
+    if (!button) return;
+    state.activePaintTarget = button.dataset.paintTarget || "content";
+    canvas.setPaintTarget(state.activePaintTarget);
+    renderPaintTargetRail();
+    renderHeroRolePair();
+    setTopbarStatus(`Paint target ${state.activePaintTarget}`);
+    persistSession();
+  });
+
+  els.stagePaintTargetRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-paint-target]");
+    if (!button) return;
+    state.activePaintTarget = button.dataset.paintTarget || "content";
+    canvas.setPaintTarget(state.activePaintTarget);
+    renderPaintTargetRail();
+    renderHeroRolePair();
+    setTopbarStatus(`Paint target ${state.activePaintTarget}`);
+    persistSession();
+  });
+
+  function applyStartMode(mode = state.startMode, { quiet = false } = {}) {
+    if (!state.selected) return false;
+    const nextMode = ["full", "silhouette", "blank"].includes(mode) ? mode : "full";
+    state.startMode = nextMode;
+    if (nextMode === "blank") {
+      state.sourceOverlayVisible = false;
+      canvas.setSourceOverlayVisible(false);
+      syncMaskUi();
+    }
+    renderStartModeRail();
+    let changed = false;
+    if (nextMode === "full") {
+      canvas.reset();
+      changed = true;
+    } else if (nextMode === "silhouette") {
+      changed = canvas.startSilhouette(selectedActiveHex());
+    } else if (nextMode === "blank") {
+      changed = canvas.startBlankCanvas();
+    }
+    updatePaletteGrid();
+    renderHeroRolePair();
+    if (!quiet) {
+      setTopbarStatus(nextMode === "full"
+        ? "Full source start restored"
+        : nextMode === "silhouette"
+          ? "Silhouette start armed"
+          : "Blank 24x24 start armed");
+    }
+    persistSession();
+    return changed;
+  }
+
+  els.startModeRail?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-start-mode]");
+    if (!button) return;
+    applyStartMode(button.dataset.startMode || "full");
+  });
+
+  els.openDockColors?.addEventListener("click", () => {
+    setSidebarOpen(true);
+    setTopbarStatus("Studio deck opened");
   });
 
   els.noiseTargetRail?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-noise-target]");
     if (!button) return;
-    state.activeNoiseTarget = button.dataset.noiseTarget || "background";
-    state.globalModifiers.grainTarget = state.activeNoiseTarget;
+    const key = button.dataset.noiseTarget || "";
+    if (!["background", "outline", "content"].includes(key)) return;
+    const currentTargets = canvas.getNoiseRoleTargets();
+    const nextTargets = {
+      ...currentTargets,
+      [key]: !currentTargets[key],
+    };
+    canvas.setNoiseRoleTargets(nextTargets);
     renderNoiseTargetRail();
-    setTopbarStatus(`Noise target ${state.activeNoiseTarget}`);
+    setTopbarStatus(nextTargets[key] ? `Role grain armed for ${key}` : `Role grain cleared for ${key}`);
+    persistSession();
+  });
+
+  els.clearRoleGrain?.addEventListener("click", () => {
+    canvas.setNoiseRoleTargets({
+      background: false,
+      outline: false,
+      content: false,
+    });
+    renderNoiseTargetRail();
+    setTopbarStatus("Role grain cleared");
+    persistSession();
   });
 
   els.noiseAmount?.addEventListener("input", () => {
@@ -931,53 +1197,96 @@ export function mountNoStudioTool(root, shellApi = {}) {
     els.noiseAmountValue.textContent = `${state.noiseAmount}%`;
   }
 
+  els.showMask?.addEventListener("click", () => {
+    state.showNoiseMask = !state.showNoiseMask;
+    canvas.setShowNoiseMask(state.showNoiseMask);
+    syncMaskUi();
+    setTopbarStatus(state.showNoiseMask ? "Noise mask overlay enabled" : "Noise mask overlay hidden");
+    persistSession();
+  });
+
+  els.clearMask?.addEventListener("click", () => {
+    const changed = canvas.clearNoiseMask();
+    if (!changed) {
+      setTopbarStatus("Manual noise mask already clear");
+      return;
+    }
+    setTopbarStatus("Manual noise mask cleared");
+  });
+
+  els.sourceOverlayToggle?.addEventListener("click", () => {
+    state.sourceOverlayVisible = !state.sourceOverlayVisible;
+    canvas.setSourceOverlayVisible(state.sourceOverlayVisible);
+    syncMaskUi();
+    setTopbarStatus(state.sourceOverlayVisible ? "Source overlay enabled" : "Source overlay hidden");
+    persistSession();
+  });
+
   // ── Palette grid ──────────────────────────────────────────────
+
+  function currentCreativeClassification() {
+    if (!state.selected) return [];
+    const pair = canvas.getGlobalRolePair();
+    const palette = normalizeHexPalette(canvas.getCompositionPalette());
+    const nonRole = palette
+      .filter((hex) => hex !== pair.background && hex !== pair.outline)
+      .sort((a, b) => hexLuma(a) - hexLuma(b));
+    const classified = [
+      { hex: pair.background, role: "background" },
+      { hex: pair.outline, role: "outline" },
+    ];
+    if (!nonRole.length) return classified;
+    for (let index = 0; index < nonRole.length; index += 1) {
+      const ratio = nonRole.length === 1 ? 0 : index / Math.max(1, nonRole.length - 1);
+      const role = ratio >= 0.66 ? "accent" : ratio >= 0.33 ? "neutral" : "body";
+      classified.push({ hex: nonRole[index], role });
+    }
+    return classified;
+  }
+
+  function syncPinnedPaletteMap() {
+    state.curatedPaletteMap = Object.fromEntries(
+      (state.palettePins || []).map((hex) => [String(hex).toUpperCase(), String(hex).toUpperCase()]),
+    );
+  }
 
   function sourceRoleForHex(hex) {
     const key = String(hex || "").trim().toUpperCase();
     if (!/^#[0-9A-F]{6}$/.test(key)) return "body";
-    return state.sourceRoleByHex.get(key) || "body";
+    const current = currentCreativeClassification().find((entry) => String(entry?.hex || "").toUpperCase() === key);
+    return current?.role || state.sourceRoleByHex.get(key) || "body";
   }
 
   function renderPaletteCurationReadout() {
     if (!els.paletteCurationReadout) return;
-    const selected = String(state.curationSourceHex || "").toUpperCase();
+    const selected = String(state.activeColorHex || "").toUpperCase();
+    const pins = (state.palettePins || []).slice(0, 2);
     if (!/^#[0-9A-F]{6}$/.test(selected)) {
-      els.paletteCurationReadout.textContent = "Pick a source swatch, then map it to your active color.";
+      els.paletteCurationReadout.textContent = pins.length
+        ? `Pinned · ${pins.join(" · ")}`
+        : "Tap a swatch to pick it up as your active color. Pin up to 2 colors.";
       return;
     }
-    const role = sourceRoleForHex(selected);
-    const mapped = String(state.curatedPaletteMap[selected] || "").toUpperCase();
-    if (/^#[0-9A-F]{6}$/.test(mapped)) {
-      els.paletteCurationReadout.textContent = `${selected} (${role}) → ${mapped}`;
-      return;
-    }
-    els.paletteCurationReadout.textContent = `${selected} (${role}) is not mapped yet`;
+    els.paletteCurationReadout.textContent = pins.length
+      ? `Active ${selected} · Pinned ${pins.join(" · ")}`
+      : `Active color · ${selected}`;
   }
 
   function updatePaletteGrid() {
-    const colors = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
-    const selectedSource = String(state.curationSourceHex || "").toUpperCase();
+    const colors = normalizeHexPalette(canvas.getCompositionPalette());
     const activeHex = selectedActiveHex();
     els.paletteGrid.innerHTML = colors.map((hex) => {
       const sourceHex = String(hex || "").toUpperCase();
-      const mappedHex = String(state.curatedPaletteMap[sourceHex] || "").toUpperCase();
       const role = sourceRoleForHex(sourceHex);
-      const isMapped = /^#[0-9A-F]{6}$/.test(mappedHex);
-      const isSourceSelected = sourceHex === selectedSource;
       const isActive = sourceHex === activeHex;
+       const isPinned = (state.palettePins || []).includes(sourceHex);
       const classes = [
         "palette-swatch",
-        isMapped ? "is-mapped" : "",
-        isSourceSelected ? "is-source-selected" : "",
         isActive ? "is-active" : "",
+        isPinned ? "is-pinned" : "",
       ].filter(Boolean).join(" ");
-      const style = isMapped && mappedHex !== sourceHex
-        ? `background:linear-gradient(135deg, ${escapeHtml(sourceHex)} 0%, ${escapeHtml(sourceHex)} 50%, ${escapeHtml(mappedHex)} 50%, ${escapeHtml(mappedHex)} 100%);`
-        : `background:${escapeHtml(sourceHex)};`;
-      const title = isMapped
-        ? `${sourceHex} (${role}) → ${mappedHex}`
-        : `${sourceHex} (${role})`;
+      const style = `background:${escapeHtml(sourceHex)};`;
+      const title = `${sourceHex} (${role})${isPinned ? " · pinned" : ""}`;
       return `<button class="${classes}" data-hex="${escapeHtml(sourceHex)}" style="${style}" title="${escapeHtml(title)}"></button>`;
     }).join("") || '<span style="font-size:11px;color:var(--text-dim)">Select a punk</span>';
     renderPaletteCurationReadout();
@@ -987,16 +1296,37 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const btn = e.target.closest("[data-hex]");
     if (!btn) return;
     const pickedHex = String(btn.dataset.hex || "").toUpperCase();
-    state.curationSourceHex = pickedHex;
     setActiveColorFromHex(pickedHex);
     setTopbarStatus(`Active color ${pickedHex} armed`);
-
-    if (!state.useActiveBg) {
-      renderHeroRolePair();
-    }
     updatePaletteGrid();
     persistSession();
   });
+
+  function pinActiveColor() {
+    const hex = selectedActiveHex();
+    if (!/^#[0-9A-F]{6}$/.test(hex)) return;
+    const next = (state.palettePins || []).filter((value) => value !== hex);
+    next.unshift(hex);
+    state.palettePins = next.slice(0, 2);
+    syncPinnedPaletteMap();
+    invalidateVariantRailState();
+    updatePaletteGrid();
+    setTopbarStatus(`Pinned ${hex}`);
+    persistSession();
+  }
+
+  function clearPalettePins() {
+    if (!state.palettePins.length) return;
+    state.palettePins = [];
+    syncPinnedPaletteMap();
+    invalidateVariantRailState();
+    updatePaletteGrid();
+    setTopbarStatus("Palette pins cleared");
+    persistSession();
+  }
+
+  els.pinActiveColor?.addEventListener("click", pinActiveColor);
+  els.clearPalettePins?.addEventListener("click", clearPalettePins);
 
   function mapActiveColorToSelectedSource() {
     const sourceHex = String(state.curationSourceHex || "").toUpperCase();
@@ -1011,6 +1341,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     }
     const targetHex = selectedActiveHex();
     state.curatedPaletteMap[sourceHex] = targetHex;
+    invalidateVariantRailState();
     updatePaletteGrid();
     setTopbarStatus(`Mapped ${sourceHex} → ${targetHex}`);
     persistSession();
@@ -1023,6 +1354,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     delete state.curatedPaletteMap[sourceHex];
+    invalidateVariantRailState();
     updatePaletteGrid();
     setTopbarStatus(`Cleared mapping for ${sourceHex}`);
     persistSession();
@@ -1031,6 +1363,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function resetPaletteCuration() {
     state.curatedPaletteMap = {};
     state.curationSourceHex = null;
+    invalidateVariantRailState();
     updatePaletteGrid();
     setTopbarStatus("Curated palette reset");
     persistSession();
@@ -1042,22 +1375,20 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     const family = activeCreativeFamily();
-    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const variant = state.variantByFamily[family] || createUniqueVariant(family, classified);
-    const backgroundHex = resolveBackgroundForCast(family, { refreshWorld: true });
-    const result = buildFamilyResult(classified, family, {
-      preset: variant,
-      backgroundHex,
-      traitPhase: 0,
-      panelIndex: 0,
-      panelCount: 1,
-      popSheetStyle: state.popSheetStyle,
-    });
-    const nextMapping = { ...(result.mapping || {}) };
-    const floor = hexLuma(result.roles?.outline || "#040404");
-    const used = new Set(Object.values(nextMapping).map((hex) => String(hex || "").toUpperCase()));
-    used.add(String(result.roles?.background || "").toUpperCase());
-    used.add(String(result.roles?.outline || "").toUpperCase());
+    const currentRail = railStateForFamily(family);
+    const variant = state.variantByFamily[family]
+      || loadVariantFromRail(
+        family,
+        Number(currentRail.pageIndex) || 0,
+        currentRail.slotIndex >= 0 ? currentRail.slotIndex : 0,
+        { statusPrefix: "Curated Cast" },
+      );
+    if (!variant) return;
+    const nextMapping = { ...(variant.mapping || {}) };
+    const used = new Set([
+      String(variant.roles?.background || "").toUpperCase(),
+      String(variant.roles?.outline || "").toUpperCase(),
+    ]);
 
     for (const [sourceHexRaw, targetHexRaw] of Object.entries(state.curatedPaletteMap || {})) {
       const sourceHex = String(sourceHexRaw || "").toUpperCase();
@@ -1065,22 +1396,53 @@ export function mountNoStudioTool(root, shellApi = {}) {
       if (!/^#[0-9A-F]{6}$/.test(sourceHex) || !/^#[0-9A-F]{6}$/.test(targetHex)) continue;
       const role = sourceRoleForHex(sourceHex);
       if (role === "background" || role === "outline") continue;
-      let safeHex = targetHex;
-      if (hexLuma(safeHex) <= floor) {
-        safeHex = mixHex(safeHex, "#FFFFFF", 0.18);
+      let safeHex = targetHex.toUpperCase();
+      if (used.has(safeHex)) {
+        safeHex = ensureDistinctHex(safeHex, used, { floor: -1 });
+      } else {
+        used.add(safeHex);
       }
-      nextMapping[sourceHex] = ensureDistinctHex(safeHex, used, { floor });
+      nextMapping[sourceHex] = safeHex;
     }
 
-    state.variantByFamily[family] = variant;
-    syncHeroPairFromRoles(result.roles, activeRoleStep());
-    canvas.applyColorMapping(nextMapping, result.roles);
+    const curatedVariant = {
+      ...variant,
+      mapping: nextMapping,
+      palette: normalizeHexPalette([
+        variant.roles?.background,
+        variant.roles?.outline,
+        ...Object.values(nextMapping || {}),
+      ]),
+      paletteSignature: makePaletteSignature([
+        variant.roles?.background,
+        variant.roles?.outline,
+        ...Object.values(nextMapping || {}),
+      ]),
+      ui: {
+        ...(variant.ui || {}),
+        chips: [...new Set([...(variant.ui?.chips || []), "curated map"])].slice(0, 5),
+      },
+    };
+
+    state.variantByFamily[family] = curatedVariant;
+    rememberAcceptedVariant(curatedVariant);
+    state.activeStudioVariant = curatedVariant;
+    syncHeroPairFromRoles(curatedVariant.roles, activeRoleStep());
+    canvas.applyColorMapping(nextMapping, curatedVariant.roles);
     state.noFieldLastFamily = family;
-    state.lastReductionMode = "none";
+    state.lastReductionMode = "curated";
+    state.activeStudioProvenance = buildGalleryProvenance({
+      variant: curatedVariant,
+      curatedPaletteMap: state.curatedPaletteMap,
+      familyModifiers: state.familyModifiers[family] || {},
+      globalModifiers: state.globalModifiers,
+      outputSignature: makeCanvasOutputSignature(),
+      sourcePaletteSignature: curatedVariant.sourcePaletteSignature || currentSourcePaletteSignature(),
+    });
     renderHeroRolePair();
     renderVariantPanel();
     updatePaletteGrid();
-    setTopbarStatus(`Curated Cast · ${FAMILY_LABELS[family] || "Studio"} · original-source rerender`);
+    setTopbarStatus(`Curated Cast · ${FAMILY_LABELS[family] || "Studio"} · live canvas mutation`);
     pulseStudio("variant");
     persistSession();
   }
@@ -1186,6 +1548,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (key === "b") selectTool("paint");
     if (key === "g") selectTool("fill");
     if (key === "i") selectTool("eyedropper");
+    if (key === "n") selectTool("noise-paint");
+    if (key === "e") selectTool("noise-erase");
     if (key === "=" || key === "+") { canvas.zoomIn(); updateZoomStatus(); }
     if (key === "-") { canvas.zoomOut(); updateZoomStatus(); }
 
@@ -1221,9 +1585,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
           <div class="shortcut-group">
             <div class="shortcut-group-title">Tools</div>
             <div class="shortcut-row"><kbd>V</kbd><span>Pointer</span></div>
-            <div class="shortcut-row"><kbd>B</kbd><span>Paint</span></div>
-            <div class="shortcut-row"><kbd>G</kbd><span>Fill Block</span></div>
+            <div class="shortcut-row"><kbd>B</kbd><span>Brush</span></div>
+            <div class="shortcut-row"><kbd>G</kbd><span>Fill</span></div>
             <div class="shortcut-row"><kbd>I</kbd><span>Eyedropper</span></div>
+            <div class="shortcut-row"><kbd>N</kbd><span>Noise Paint</span></div>
+            <div class="shortcut-row"><kbd>E</kbd><span>Noise Erase</span></div>
           </div>
           <div class="shortcut-group">
             <div class="shortcut-group-title">Canvas</div>
@@ -1259,11 +1625,209 @@ export function mountNoStudioTool(root, shellApi = {}) {
   // ── Family Engines ─────────────────────────────────────────────
 
   function activeCreativeFamily() {
-    if (state.activePresetTab === "noir") return "noir";
+    if (state.activePresetTab === "chrome") return "chrome";
     if (state.activePresetTab === "warhol") return "warhol";
     if (state.activePresetTab === "acid") return "acid";
     if (state.activePresetTab === "pastel") return "pastel";
     return "mono";
+  }
+
+  function railStateForFamily(family = activeCreativeFamily()) {
+    return state.variantRailByFamily[family] || createEmptyRailState();
+  }
+
+  function replaceRailState(family, nextState) {
+    state.variantRailByFamily = {
+      ...state.variantRailByFamily,
+      [family]: nextState,
+    };
+  }
+
+  function invalidateVariantRailState(family = null, { clearVariant = false } = {}) {
+    if (family) {
+      replaceRailState(family, createEmptyRailState());
+      if (clearVariant) {
+        state.variantByFamily[family] = null;
+        if (state.activeStudioVariant?.family === family) {
+          state.activeStudioVariant = null;
+          state.activeStudioProvenance = null;
+        }
+      }
+      return;
+    }
+    state.variantRailByFamily = createInitialVariantRailByFamily();
+    if (clearVariant) {
+      state.variantByFamily = { mono: null, chrome: null, warhol: null, acid: null, pastel: null };
+      state.activeStudioVariant = null;
+      state.activeStudioProvenance = null;
+    }
+  }
+
+  function currentSourcePaletteSignature() {
+    return makeSourcePaletteSignature(currentCreativeClassification());
+  }
+
+  function currentCuratedPaletteSignature() {
+    return makeCuratedPaletteSignature(state.variantRailLocks.curatedMap ? state.curatedPaletteMap : {});
+  }
+
+  function recentGalleryHistoryForFamily(family) {
+    return (Array.isArray(state.galleryItems) ? state.galleryItems : [])
+      .filter((entry) => {
+        const rawFamily = String(entry?.family || entry?.familyId || "").toLowerCase();
+        const normalized = rawFamily === "pop" ? "warhol" : rawFamily === "noir" ? "chrome" : rawFamily;
+        return normalized === family;
+      })
+      .slice(0, 48)
+      .map((entry) => ({
+        family,
+        palette: normalizeHexPalette(entry?.palette || entry?.paletteHexes || []),
+      }))
+      .filter((entry) => entry.palette.length);
+  }
+
+  function localAcceptedHistoryForFamily(family) {
+    return (state.localAcceptedVariantsByFamily[family] || []).slice(0, 24);
+  }
+
+  function currentNoveltyHistorySignature(family) {
+    const local = localAcceptedHistoryForFamily(family).map((entry) => entry.paletteSignature || entry?.palette?.join("|") || "").join(":");
+    const gallery = recentGalleryHistoryForFamily(family).map((entry) => entry.palette.join("|")).join(":");
+    return `${local}::${gallery}`;
+  }
+
+  function rememberAcceptedVariant(variant) {
+    const family = String(variant?.family || "").toLowerCase();
+    if (!FAMILY_IDS.includes(family) || !variant?.paletteSignature) return;
+    const current = state.localAcceptedVariantsByFamily[family] || [];
+    if (current.some((entry) => entry.paletteSignature === variant.paletteSignature)) return;
+    state.localAcceptedVariantsByFamily = {
+      ...state.localAcceptedVariantsByFamily,
+      [family]: [
+        {
+          family,
+          palette: normalizeHexPalette(variant.palette || []),
+          paletteSignature: String(variant.paletteSignature || ""),
+        },
+        ...current,
+      ].slice(0, 24),
+    };
+  }
+
+  function currentRailContextSignature(family) {
+    return railContextSignature({
+      tokenId: state.selected?.id || 0,
+      family,
+      sourcePaletteSignature: currentSourcePaletteSignature(),
+      selectedActiveHex: selectedActiveHex(),
+      noMinimalMode: state.noMinimalDeltaMode,
+      useActiveBg: state.useActiveBg,
+      lockState: state.variantRailLocks,
+      curatedMapSignature: currentCuratedPaletteSignature(),
+      noveltyHistorySignature: currentNoveltyHistorySignature(family),
+      globalModifiers: state.globalModifiers,
+      familyModifiers: state.familyModifiers[family] || {},
+    });
+  }
+
+  function buildRailLockSnapshot(family) {
+    const current = state.variantByFamily[family] || state.activeStudioVariant || null;
+    return {
+      backgroundHex: current?.roles?.background || state.noMinimalPreviewPair?.background || null,
+      accentHue: current?.meta?.accentHue ?? null,
+      curatedPaletteMap: sanitizeCuratedPaletteMap(state.curatedPaletteMap),
+    };
+  }
+
+  function ensureVariantRailPage(family, pageIndex, { force = false } = {}) {
+    if (!state.selected || !state.originalImageData) return null;
+    const currentContext = currentRailContextSignature(family);
+    const rail = railStateForFamily(family);
+    let nextRail = rail;
+    if (rail.contextSignature !== currentContext) {
+      nextRail = {
+        ...createEmptyRailState(),
+        contextSignature: currentContext,
+      };
+    }
+
+    const key = String(Math.max(0, Number(pageIndex) || 0));
+    if (!force && nextRail.pages[key]) {
+      if (nextRail !== rail) replaceRailState(family, nextRail);
+      return nextRail.pages[key];
+    }
+
+    const page = buildFamilyVariantRailPage({
+      tokenId: state.selected.id,
+      family,
+      classified: currentCreativeClassification(),
+      globalModifiers: state.globalModifiers,
+      familyModifiers: state.familyModifiers[family] || {},
+      noMinimalMode: state.noMinimalDeltaMode,
+      selectedActiveHex: selectedActiveHex(),
+      useActiveBg: state.useActiveBg,
+      curatedPaletteMap: state.curatedPaletteMap,
+      lockState: state.variantRailLocks,
+      lockSnapshot: buildRailLockSnapshot(family),
+      noveltyHistory: {
+        localAcceptedVariants: localAcceptedHistoryForFamily(family),
+        galleryHistory: recentGalleryHistoryForFamily(family),
+      },
+      pageIndex: Number(key),
+      pageSize: DEFAULT_RAIL_PAGE_SIZE,
+    });
+
+    replaceRailState(family, {
+      ...nextRail,
+      contextSignature: currentContext,
+      pages: {
+        ...(nextRail.pages || {}),
+        [key]: page,
+      },
+    });
+    return page;
+  }
+
+  function applyFamilyVariant(variant, { statusPrefix = "Cast" } = {}) {
+    if (!variant) return null;
+    const family = variant.family || activeCreativeFamily();
+    state.variantByFamily[family] = variant;
+    rememberAcceptedVariant(variant);
+    state.activeStudioVariant = variant;
+    syncHeroPairFromRoles(variant.roles, activeRoleStep());
+    canvas.applyColorMapping(variant.mapping, variant.roles);
+    state.noFieldLastFamily = family;
+      state.lastReductionMode = "none";
+      state.activeStudioProvenance = buildGalleryProvenance({
+      variant,
+      curatedPaletteMap: state.variantRailLocks.curatedMap ? state.curatedPaletteMap : {},
+      familyModifiers: state.familyModifiers[family] || {},
+      globalModifiers: state.globalModifiers,
+      outputSignature: makeCanvasOutputSignature(),
+      sourcePaletteSignature: variant.sourcePaletteSignature || currentSourcePaletteSignature(),
+    });
+    renderHeroRolePair();
+    renderVariantPanel();
+    updatePaletteGrid();
+    const familyLabel = FAMILY_LABELS[family] || "Studio";
+    setTopbarStatus(`${statusPrefix} · ${familyLabel} · ${variant.score.toFixed(1)} fit · live canvas mutation`);
+    pulseStudio("variant");
+    persistSession();
+    return variant;
+  }
+
+  function loadVariantFromRail(family, pageIndex, slotIndex, { statusPrefix = "Cast" } = {}) {
+    const page = ensureVariantRailPage(family, pageIndex);
+    if (!page || !page.variants.length) return null;
+    const nextSlot = Math.max(0, Math.min(page.variants.length - 1, Number(slotIndex) || 0));
+    const variant = page.variants[nextSlot];
+    replaceRailState(family, {
+      ...railStateForFamily(family),
+      pageIndex,
+      slotIndex: nextSlot,
+      activeVariantId: variant.id,
+    });
+    return applyFamilyVariant(variant, { statusPrefix });
   }
 
   function activeRoleStep() {
@@ -1280,7 +1844,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function activeAnchorHex() {
     const raw = String(state.activeColorHex || els.colorHex.value || "").trim().toUpperCase();
     if (/^#[0-9A-F]{6}$/.test(raw)) return raw;
-    const palette = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCurrentPalette();
+    const palette = state.sourcePaletteHexes.length ? state.sourcePaletteHexes : canvas.getCompositionPalette();
     return palette[0] || "#808080";
   }
 
@@ -1297,7 +1861,7 @@ export function mountNoStudioTool(root, shellApi = {}) {
     if (!ranked.length) {
       return activeAnchorHex();
     }
-    if (family === "noir" || family === "mono" || family === "acid") {
+    if (family === "chrome" || family === "mono" || family === "acid") {
       return String(ranked[0].hex || activeAnchorHex()).toUpperCase();
     }
     if (family === "pastel") {
@@ -1376,6 +1940,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
     return state.noMinimalPreviewPair;
   }
 
+  function ensureStudioCastPreviewPair() {
+    const preview = ensureNoMinimalPreviewPair();
+    return deriveNoMinimalismPair(preview.background, "exact");
+  }
+
   function syncHeroPairFromRoles(roles, roleStep = activeRoleStep()) {
     const background = String(roles?.background || "").toUpperCase();
     const figure = String((roles?.outline || roles?.figure || "")).toUpperCase();
@@ -1449,27 +2018,11 @@ export function mountNoStudioTool(root, shellApi = {}) {
   }
 
   function currentBackgroundHex() {
-    const imageData = canvas.exportImageData();
-    const data = imageData.data;
-    const occupied = state.originalOccupied || canvas.getOccupied();
-    const counts = new Map();
-    for (let y = 0; y < imageData.height; y += 1) {
-      for (let x = 0; x < imageData.width; x += 1) {
-        if (occupied.has(`${x},${y}`)) continue;
-        const i = (y * imageData.width + x) * 4;
-        const hex = rgbToHex(data[i], data[i + 1], data[i + 2]);
-        counts.set(hex, (counts.get(hex) || 0) + 1);
-      }
-    }
-    if (!counts.size) {
-      const palette = canvas.getCurrentPalette().slice().sort((a, b) => hexLuma(a) - hexLuma(b));
-      return palette[0] || "#000000";
-    }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return canvas.getGlobalRolePair().background;
   }
 
   function nearestPaletteHex(targetHex, palette = null) {
-    const colors = Array.isArray(palette) && palette.length ? palette : canvas.getCurrentPalette();
+    const colors = Array.isArray(palette) && palette.length ? palette : canvas.getCompositionPalette();
     if (!colors.length) return null;
     let bestHex = colors[0];
     let bestDistance = Number.POSITIVE_INFINITY;
@@ -1486,21 +2039,14 @@ export function mountNoStudioTool(root, shellApi = {}) {
   function applyNoise() {
     if (!state.selected) return;
 
-    const palette = canvas.getCurrentPalette();
     const amountNorm = Math.max(0, Math.min(1, state.noiseAmount / 100));
     const noisePass = ++state.noisePass;
-    const activeHex = nearestPaletteHex(selectedActiveHex(), palette);
     applyDisplayGrain({
       enabled: amountNorm > 0,
-      target: state.activeNoiseTarget,
       amount: amountNorm,
-      activeHex,
       seed: noisePass,
     });
-    const targetLabel = state.activeNoiseTarget === "background"
-      ? "background"
-      : (state.activeNoiseTarget === "active" ? "selected band" : "figure");
-    setTopbarStatus(`Grain ${targetLabel} · ${state.noiseAmount}% · display layer`);
+    setTopbarStatus(`Grain live · ${state.noiseAmount}% · manual plus role masks`);
     pulseStudio("dither");
   }
 
@@ -1526,10 +2072,13 @@ export function mountNoStudioTool(root, shellApi = {}) {
       return;
     }
     if (!state.galleryItems.length) {
-      els.galleryList.innerHTML = `<div class="gallery-empty">No compositions saved yet.</div>`;
+      els.galleryList.innerHTML = `<div class="gallery-empty">${state.galleryStorage === "sqlite" ? "No compositions saved yet." : "Local-only gallery is empty."}</div>`;
       return;
     }
-    els.galleryList.innerHTML = state.galleryItems.map((item) => {
+    const storageNotice = state.galleryStorage === "sqlite"
+      ? ""
+      : `<div class="gallery-empty">Local-only fallback. These saves are only visible in this browser.</div>`;
+    els.galleryList.innerHTML = `${storageNotice}${state.galleryItems.map((item) => {
       const bg = item.rolePair?.background || "";
       const fg = item.rolePair?.figure || "";
       const mediaType = String(item.mediaType || "").toLowerCase() === "gif" ? "gif" : "png";
@@ -1545,22 +2094,26 @@ export function mountNoStudioTool(root, shellApi = {}) {
       const signatureLine = signatureResolved
         ? `<span class="gallery-subline gallery-signature">${escapeHtml(signatureResolved)}</span>`
         : "";
+      const voteLine = `<button class="gallery-refresh gallery-vote-inline${item?.viewerHasVoted ? " is-active" : ""}" type="button" data-gallery-vote="${escapeHtml(item.id || "")}" ${item?.viewerHasVoted || state.galleryStorage !== "sqlite" ? "disabled" : ""}>▲ ${Number(item?.voteCount) || 0}${item?.viewerHasVoted ? " · voted" : ""}</button>`;
       const paletteLine = palettePreview.length
         ? `<span class="gallery-palette-strip">${palettePreview.map((hex) => `<span class="gallery-palette-chip" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)}"></span>`).join("")}${palette.length > palettePreview.length ? `<span class="gallery-palette-count">+${palette.length - palettePreview.length}</span>` : ""}</span>`
         : "";
       return `
-      <a class="gallery-card" href="${escapeHtml(item.viewUrl || mediaUrl || "#")}" target="_blank" rel="noreferrer">
-        <img class="gallery-thumb" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
-        <span class="gallery-meta">
-          <span class="gallery-title">${escapeHtml(item.label || `No-Studio #${item.tokenId || 0}`)}</span>
-          <span class="gallery-subline">#${Number(item.tokenId) || 0} \u00b7 ${(item.family || "studio").toUpperCase()} \u00b7 ${mediaType.toUpperCase()}</span>
-          ${colorPair}
-          ${paletteLine}
-          ${signatureLine}
-        </span>
-      </a>
+      <div class="gallery-card-shell">
+        <a class="gallery-card" href="${escapeHtml(item.viewUrl || mediaUrl || "#")}" target="_blank" rel="noreferrer">
+          <img class="gallery-thumb" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(item.label || "No-Gallery entry")}" loading="lazy" />
+          <span class="gallery-meta">
+            <span class="gallery-title">${escapeHtml(item.label || `No-Studio #${item.tokenId || 0}`)}</span>
+            <span class="gallery-subline">#${Number(item.tokenId) || 0} \u00b7 ${(item.family || "studio").toUpperCase()} \u00b7 ${mediaType.toUpperCase()}</span>
+            ${colorPair}
+            ${paletteLine}
+            ${signatureLine}
+          </span>
+        </a>
+        ${voteLine}
+      </div>
     `;
-    }).join("");
+    }).join("")}`;
   }
 
   async function refreshGallery({ silent = false } = {}) {
@@ -1574,6 +2127,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     try {
       const payload = await listNoStudioGallery({ limit: 12 });
       state.galleryItems = Array.isArray(payload.items) ? payload.items : [];
+      state.galleryStorage = String(payload?.storage || "sqlite");
+      invalidateVariantRailState();
       state.galleryMessage = "";
       if (!silent) setTopbarStatus(`No-Gallery · ${state.galleryItems.length} saved`);
     } catch (error) {
@@ -1652,9 +2207,32 @@ export function mountNoStudioTool(root, shellApi = {}) {
       } else {
         mediaDataUrl = canvas.exportPng1024().toDataURL("image/png");
       }
+      const familyId = state.activePresetTab === "warhol" ? "pop" : state.activePresetTab;
+      const outputSignature = makeCanvasOutputSignature();
+      const liveRolePair = canvas.getGlobalRolePair();
+      const composition = canvas.exportCompositionState();
+      const provenance = {
+        ...buildGalleryProvenance({
+        variant: state.activeStudioVariant || state.variantByFamily[state.activePresetTab] || null,
+        curatedPaletteMap: state.curatedPaletteMap,
+        familyModifiers: state.activeStudioProvenance?.familyModifiers || state.familyModifiers[state.activePresetTab] || {},
+        globalModifiers: state.activeStudioProvenance?.globalModifiers || state.globalModifiers,
+        outputSignature,
+        sourcePaletteSignature: state.activeStudioProvenance?.sourcePaletteSignature || currentSourcePaletteSignature(),
+        }),
+        family: familyId,
+        familyModifiers: state.activeStudioProvenance?.familyModifiers || state.familyModifiers[state.activePresetTab] || {},
+        globalModifiers: state.activeStudioProvenance?.globalModifiers || state.globalModifiers,
+        globalRolePair: composition.globalRolePair,
+        roleGrid: composition.roleGrid,
+        contentGrid: composition.contentGrid,
+        noiseMask: composition.noiseMask,
+        noiseRoleTargets: composition.noiseRoleTargets,
+        outputSignature,
+      };
       const payload = await saveNoStudioGallery({
         tokenId: state.selected.id,
-        family: state.activePresetTab === "warhol" ? "pop" : state.activePresetTab,
+        family: familyId,
         label: normalizeGalleryLabel(els.topbarStatus.textContent, state.selected.id),
         mediaType: mediaKind,
         mediaDataUrl,
@@ -1666,17 +2244,29 @@ export function mountNoStudioTool(root, shellApi = {}) {
         palette: normalizeHexPalette(canvas.getCurrentPalette()),
         paletteHexes: normalizeHexPalette(canvas.getCurrentPalette()),
         rolePair: {
-          background: state.noMinimalPreviewPair?.background || currentBackgroundHex(),
-          figure: state.noMinimalPreviewPair?.figure || "—",
+          background: liveRolePair.background || currentBackgroundHex(),
+          figure: liveRolePair.outline || "—",
           mode: state.noMinimalDeltaMode,
         },
+        provenance,
       });
+      state.galleryStorage = String(payload?.storage || state.galleryStorage || "sqlite");
       if (payload?.item) {
         state.galleryItems = [payload.item, ...state.galleryItems.filter((entry) => entry.id !== payload.item.id)].slice(0, 12);
+        invalidateVariantRailState();
       }
       state.galleryMessage = "";
       renderGallery();
-      setTopbarStatus(`Saved ${mediaKind.toUpperCase()} to No-Gallery`);
+      const savedLocally = state.galleryStorage !== "sqlite";
+      if (payload?.deduped) {
+        setTopbarStatus(savedLocally
+          ? `Already saved locally · ${mediaKind.toUpperCase()}`
+          : `Already in No-Gallery · ${mediaKind.toUpperCase()}`);
+      } else {
+        setTopbarStatus(savedLocally
+          ? `Saved ${mediaKind.toUpperCase()} locally · browser-only`
+          : `Saved ${mediaKind.toUpperCase()} to No-Gallery`);
+      }
     } catch (error) {
       setTopbarStatus(error.message || "Save to No-Gallery failed");
     } finally {
@@ -1691,11 +2281,51 @@ export function mountNoStudioTool(root, shellApi = {}) {
 
   function getPopSheetSpec(layoutId) {
     const specs = {
+      "1x3": { cols: 1, rows: 3, label: "1x3" },
       "2x2": { cols: 2, rows: 2, label: "2x2" },
       "3x3": { cols: 3, rows: 3, label: "3x3" },
       "4x4": { cols: 4, rows: 4, label: "4x4" },
     };
     return specs[layoutId] || specs["2x2"];
+  }
+
+  function currentGridFrameStyle() {
+    return GRID_FRAME_TONES[state.gridFrameTone] || GRID_FRAME_TONES.cream;
+  }
+
+  function cloneImageDataLocal(imageData) {
+    return new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
+  }
+
+  function imageDataHexAt(imageData, index) {
+    const offset = index * 4;
+    return rgbToHex(
+      imageData.data[offset],
+      imageData.data[offset + 1],
+      imageData.data[offset + 2],
+    ).toUpperCase();
+  }
+
+  function tileKeepsArtworkVisible(tile, roleGrid = []) {
+    if (!(tile instanceof ImageData) || !Array.isArray(roleGrid) || !roleGrid.length) return true;
+    const occupiedIndexes = [];
+    let backgroundIndex = -1;
+    for (let index = 0; index < roleGrid.length; index += 1) {
+      if (roleGrid[index] === "b") {
+        if (backgroundIndex < 0) backgroundIndex = index;
+        continue;
+      }
+      occupiedIndexes.push(index);
+    }
+    if (!occupiedIndexes.length) return true;
+    const bgHex = imageDataHexAt(tile, Math.max(0, backgroundIndex));
+    let visibleCount = 0;
+    for (const index of occupiedIndexes) {
+      if (imageDataHexAt(tile, index) === bgHex) continue;
+      visibleCount += 1;
+      if (visibleCount >= 4) return true;
+    }
+    return false;
   }
 
 function makePanelPaletteSignature(result) {
@@ -1895,6 +2525,14 @@ function computePopPanelBackground({
   sheetNonce = 0,
   activeBackgroundHex = null,
 }) {
+  if (activeBackgroundHex) {
+    return String(activeBackgroundHex || "#6A6A6A").toUpperCase();
+  }
+  const posterBank = popStyle === POP_SHEET_STYLE_SCREENPRINT
+    ? POP_SCREENPRINT_BACKGROUNDS
+    : POP_POSTER_BACKGROUNDS;
+  const picked = posterBank[(panelIndex + attempt + sheetNonce) % posterBank.length];
+  if (picked) return picked;
   const anchorSource = activeBackgroundHex
     || classified.find((entry) => entry.role === "accent")?.hex
     || classified.find((entry) => entry.role !== "background" && entry.role !== "outline")?.hex
@@ -1938,13 +2576,90 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
   return next;
 }
 
-  function applyPopSheet(layoutId = state.popSheetLayout, styleId = state.popSheetStyle) {
-    if (!state.selected || !state.originalImageData) return;
+  function collectGridVariants(family, wantedPanels, startPage = 0) {
+    const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
+    const wanted = Math.max(0, Number(wantedPanels) || 0);
+    const out = [];
+    const seen = new Set();
+    let pageIndex = Math.max(0, Number(startPage) || 0);
+    const maxPages = Math.max(2, Math.ceil(Math.max(1, wanted) / DEFAULT_RAIL_PAGE_SIZE) + 2);
+
+    while (out.length < wanted && pageIndex < (startPage + maxPages)) {
+      const page = ensureVariantRailPage(safeFamily, pageIndex);
+      const variants = Array.isArray(page?.variants) ? page.variants : [];
+      for (const variant of variants) {
+        const signature = String(variant?.paletteSignature || variant?.id || "");
+        if (!signature || seen.has(signature)) continue;
+        seen.add(signature);
+        out.push(variant);
+        if (out.length >= wanted) break;
+      }
+      pageIndex += 1;
+    }
+
+    return out.slice(0, wanted);
+  }
+
+  function applyVariantGrid(layoutId = state.popSheetLayout, { family = activeCreativeFamily() } = {}) {
+    if (!state.selected) return;
 
     const { cols, rows, label } = getPopSheetSpec(layoutId);
-    const source = state.originalImageData;
-    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const roleByHex = state.sourceRoleByHex instanceof Map ? state.sourceRoleByHex : new Map();
+    const panelCount = cols * rows;
+    const familyLabel = FAMILY_LABELS[family] || "Studio";
+    const sheetNonce = (Number(state.popSheetBuildNonce) || 0) + 1;
+    state.popSheetBuildNonce = sheetNonce;
+    const compositionState = canvas.exportCompositionState();
+    const baseTile = canvas.exportCompositionImageData();
+
+    const tiles = [
+      baseTile,
+    ];
+    const wantedVariants = Math.max(0, panelCount - 1);
+    const pageSpan = Math.max(1, Math.ceil(Math.max(1, wantedVariants) / DEFAULT_RAIL_PAGE_SIZE));
+    const variants = collectGridVariants(family, wantedVariants, (sheetNonce - 1) * pageSpan);
+    for (const variant of variants) {
+      const tile = canvas.buildMappedImageData(variant.mapping, variant.roles);
+      tiles.push(tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile));
+    }
+
+    while (tiles.length < panelCount) {
+      tiles.push(cloneImageDataLocal(baseTile));
+    }
+
+    if (variants[0]) {
+      state.variantByFamily[family] = variants[0];
+      state.activeStudioVariant = variants[0];
+      state.activeStudioProvenance = buildGalleryProvenance({
+        variant: variants[0],
+        curatedPaletteMap: state.variantRailLocks.curatedMap ? state.curatedPaletteMap : {},
+        familyModifiers: state.familyModifiers[family] || {},
+        globalModifiers: state.globalModifiers,
+        outputSignature: makeCanvasOutputSignature(),
+        sourcePaletteSignature: variants[0].sourcePaletteSignature || currentSourcePaletteSignature(),
+      });
+    } else {
+      state.activeStudioVariant = null;
+      state.activeStudioProvenance = null;
+    }
+
+    state.noFieldLastFamily = family;
+    state.isSheetMode = true;
+    state.lastReductionMode = "grid";
+    state.lastPopSheetPanelSignatures = variants.map((variant) => String(variant?.paletteSignature || variant?.id || ""));
+    canvas.setSheetTiles(tiles, cols, rows, currentGridFrameStyle());
+    renderVariantPanel();
+    updatePaletteGrid();
+    setTopbarStatus(`${familyLabel} grid · ${label} · live canvas variants`);
+    pulseStudio("variant");
+  }
+
+  function applyPopSheet(layoutId = state.popSheetLayout, styleId = state.popSheetStyle) {
+    if (!state.selected) return;
+
+    const { cols, rows, label } = getPopSheetSpec(layoutId);
+    const classified = currentCreativeClassification();
+    const compositionState = canvas.exportCompositionState();
+    const baseTile = canvas.exportCompositionImageData();
     const panelCount = cols * rows;
     const popStyle = normalizePopSheetStyle(styleId);
     const sheetNonce = (Number(state.popSheetBuildNonce) || 0) + 1;
@@ -1978,7 +2693,6 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       if (usedRolePairs.has(rolePair)) return false;
       if (usedPaletteSignatures.has(paletteSig)) return false;
       if (usedPanelSignatures.has(panelSig)) return false;
-      if (previousPanelSignatures[panelIndex] && previousPanelSignatures[panelIndex] === visualSig) return false;
       if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
       usedRolePairs.add(rolePair);
       usedPaletteSignatures.add(paletteSig);
@@ -1988,7 +2702,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
 
     function buildPanelResult(panelIndex) {
-      const maxAttempts = 84;
+      const maxAttempts = 14;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const preset = createUniqueVariant("warhol", classified);
         const backgroundHex = computePopPanelBackground({
@@ -2046,7 +2760,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
         fallback = applyScreenprintInverseRoleRule(fallback, classified);
       }
-      for (let force = 0; force < 40; force += 1) {
+      for (let force = 0; force < 10; force += 1) {
         let candidate = diversifyPanelResult(fallback, panelIndex + 11 + force, classified);
         if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
           candidate = applyScreenprintInverseRoleRule(candidate, classified);
@@ -2060,7 +2774,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       }
 
       // Hard uniqueness fallback: deterministic branch nonce until signatures diverge.
-      for (let force = 0; force < 192; force += 1) {
+      for (let force = 0; force < 24; force += 1) {
         const forcedBg = computePopPanelBackground({
           classified,
           popStyle,
@@ -2102,69 +2816,46 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
 
     const tiles = panelResults.map((panel, panelIndex) => {
-      const tile = new Uint8ClampedArray(source.data.length);
-      const panelBackground = String(panel.roles?.background || "#000000").toUpperCase();
-      const panelOutline = String(panel.roles?.outline || "#040404").toUpperCase();
-      for (let y = 0; y < source.height; y += 1) {
-        for (let x = 0; x < source.width; x += 1) {
-          const idx = (y * source.width + x) * 4;
-          const alpha = source.data[idx + 3];
-          let targetHex = panelBackground;
-          if (alpha > 0) {
-            const origHex = rgbToHex(source.data[idx], source.data[idx + 1], source.data[idx + 2]).toUpperCase();
-            const role = roleByHex.get(origHex) || "body";
-            const isSourceBackground = origHex === "#000000";
-            if (origHex === "#040404") {
-              targetHex = panelOutline;
-            } else if (isSourceBackground) {
-              targetHex = panelBackground;
-            } else {
-              const mappedHex = panel.mapping.get(origHex);
-              if (mappedHex) {
-                targetHex = mappedHex;
-              } else if (role === "accent") {
-                targetHex = mixHex(panelOutline, panelBackground, 0.78);
-              } else if (role === "neutral") {
-                targetHex = mixHex(panelBackground, panelOutline, 0.62);
-              } else {
-                targetHex = mixHex(panelBackground, panelOutline, 0.7);
-              }
-            }
-
-            if (!isSourceBackground) {
-              const normalizedTarget = String(targetHex || "").toUpperCase();
-              if (!/^#[0-9A-F]{6}$/.test(normalizedTarget) || normalizedTarget === panelBackground || normalizedTarget === origHex) {
-                targetHex = role === "accent"
-                  ? mixHex(panelOutline, panelBackground, 0.84)
-                  : mixHex(panelBackground, panelOutline, 0.68);
-                if (String(targetHex || "").toUpperCase() === panelBackground) {
-                  targetHex = panelOutline;
-                }
-              }
-            }
-
-            if (popStyle === POP_SHEET_STYLE_SCREENPRINT && !isSourceBackground && origHex !== "#040404") {
-              targetHex = applyScreenprintInkMask(targetHex, panel.roles, x, y, panelIndex);
-            }
-          }
-          const rgb = hexToRgb(targetHex);
-          tile[idx] = rgb.r;
-          tile[idx + 1] = rgb.g;
-          tile[idx + 2] = rgb.b;
-          tile[idx + 3] = 255;
+      const tile = canvas.buildMappedImageData(Object.fromEntries(panel.mapping || []), panel.roles);
+      if (popStyle === POP_SHEET_STYLE_SCREENPRINT) {
+        for (let index = 0; index < compositionState.roleGrid.length; index += 1) {
+          if (compositionState.roleGrid[index] !== "c") continue;
+          const x = index % 24;
+          const y = Math.floor(index / 24);
+          const idx = index * 4;
+          const currentHex = rgbToHex(tile.data[idx], tile.data[idx + 1], tile.data[idx + 2]).toUpperCase();
+          const nextHex = applyScreenprintInkMask(currentHex, panel.roles, x, y, panelIndex);
+          const rgb = hexToRgb(nextHex);
+          tile.data[idx] = rgb.r;
+          tile.data[idx + 1] = rgb.g;
+          tile.data[idx + 2] = rgb.b;
         }
       }
-      return new ImageData(tile, source.width, source.height);
+      return tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile);
     });
 
-    state.variantByFamily.warhol = panelResults[0]?.preset || null;
+    state.variantByFamily.warhol = {
+      family: "warhol",
+      id: `warhol-sheet-${sheetNonce}`,
+      name: `Pop Sheet · ${label}`,
+      palette: [],
+      roles: panelResults[0]?.roles || {
+        background: "#000000",
+        outline: "#040404",
+      },
+      ui: {
+        chips: ["pop sheet", popSheetStyleLabel(popStyle)],
+      },
+    };
+    state.activeStudioVariant = null;
+    state.activeStudioProvenance = null;
     state.noFieldLastFamily = "warhol";
     state.isSheetMode = true;
     state.lastReductionMode = "pop-sheet";
     state.lastPopSheetPanelSignatures = panelResults.map((panel) => (
       panelVisualSignature(panel, { style: popStyle, layout: layoutId })
     ));
-    canvas.setSheetTiles(tiles, cols, rows);
+    canvas.setSheetTiles(tiles, cols, rows, currentGridFrameStyle());
     renderVariantPanel();
     setTopbarStatus(`Pop Sheet · ${label} ${popSheetStyleStatusSlug(popStyle)} · full 24×24 tile per panel`);
     pulseStudio("surprise");
@@ -2446,31 +3137,8 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
     state.isSheetMode = false;
     canvas.setSubdivision(1);
-    const classified = state.sourceClassifiedPalette || canvas.getClassifiedPalette();
-    const preset = createUniqueVariant(family, classified);
-    const backgroundHex = resolveBackgroundForCast(family, { refreshWorld: true });
-
-    const result = buildFamilyResult(classified, family, {
-      preset,
-      backgroundHex,
-      traitPhase: 0,
-      panelIndex: 0,
-      panelCount: 1,
-      popSheetStyle: state.popSheetStyle,
-    });
-
-    state.variantByFamily[family] = result.preset;
-    syncHeroPairFromRoles(result.roles, activeRoleStep());
-    canvas.applyColorMapping(result.mapping, result.roles);
-    state.noFieldLastFamily = family;
-    state.lastReductionMode = "none";
-    renderHeroRolePair();
-    renderVariantPanel();
-
-    const familyLabel = FAMILY_LABELS[family] || "Studio";
-    setTopbarStatus(`${statusPrefix} · ${familyLabel} · ${result.toneTarget} tones · original-source rerender`);
-    pulseStudio("variant");
-    return result;
+    invalidateVariantRailState(family);
+    return loadVariantFromRail(family, 0, 0, { statusPrefix });
   }
 
   function applyNoMinimalism() {
@@ -2480,7 +3148,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     canvas.setSubdivision(1);
     const current = canvas.exportImageData();
     const next = new Uint8ClampedArray(current.data);
-    const occupied = state.originalOccupied || canvas.getOccupied();
+    const occupied = canvas.getOccupied();
     const pair = refreshNoMinimalPreviewPair();
 
     for (let y = 0; y < current.height; y += 1) {
@@ -2499,6 +3167,8 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     }
 
     state.lastReductionMode = "no-minimalism";
+    state.activeStudioVariant = null;
+    state.activeStudioProvenance = null;
     canvas.applyImageData(new ImageData(next, current.width, current.height));
     renderHeroRolePair();
     setTopbarStatus(`No-Minimalism ${state.noMinimalDeltaMode} · ${pair.background} → ${pair.figure} · ${pair.roleStep} lift · 2 tones`);
@@ -2509,50 +3179,71 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     const activeTab = state.activePresetTab;
     const current = state.variantByFamily[activeTab] || null;
     const familyLabel = FAMILY_LABELS[activeTab] || "Studio";
-    const toneTarget = familyToneTarget(activeTab);
-    const world = ensureNoMinimalPreviewPair();
+    const rail = railStateForFamily(activeTab);
+    const currentPage = rail.pages[String(rail.pageIndex)] || null;
+    const world = current?.rolePair || ensureStudioCastPreviewPair();
     const familyHint = {
-      mono: "Tonal reduction and hue unity. Keep form while compressing colour variance.",
-      noir: "Dark-floor casting with controlled accent reveals. Concealment first.",
-      warhol: "Poster-pop casting with bold contrast for single renders and sheet builds.",
-      acid: "Synthetic clash space with unstable complements and sharper tensions.",
-      pastel: "Airy high-light render with powder softness and quiet separations.",
-    }[activeTab] || "Every cast starts from the original source punk.";
+      mono: "Single-hue ladders that keep the canvas tight but not repetitive.",
+      chrome: "Reflective ramps with cleaner highlights and colder metallic lift.",
+      warhol: "Poster-pop casting with stronger panel separation and warmer/cooler plate pressure.",
+      acid: "Controlled clash pairs with deeper grounds and sharper toxic contrast.",
+      pastel: "High-light analogous banks with softer drift and more breathing room.",
+    }[activeTab] || "Families launch from the live canvas, not from a locked source rerender.";
+    const railCards = currentPage?.variants?.length
+      ? currentPage.variants.map((variant, slotIndex) => {
+          const isActive = current?.id === variant.id || rail.activeVariantId === variant.id;
+          const paletteStrip = (variant.palette || []).slice(0, 5).map((hex) => `<span class="variant-rail-swatch" style="background:${escapeHtml(hex)}" title="${escapeHtml(hex)}"></span>`).join("");
+          const chip = String((variant.ui?.chips || [])[0] || "");
+          return `
+            <button class="variant-rail-card${isActive ? " is-active" : ""}" type="button" data-action="load-rail-variant" data-family="${activeTab}" data-page="${currentPage.pageIndex}" data-slot="${slotIndex}">
+              <span class="variant-rail-head">
+                <strong>${escapeHtml(variant.name || `${familyLabel} Variant`)}</strong>
+                <span>${variant.score.toFixed(1)}</span>
+              </span>
+              <span class="variant-rail-strip">${paletteStrip}</span>
+              <span class="variant-rail-chips">${chip ? `<span class="variant-rail-chip">${escapeHtml(chip)}</span>` : ""}</span>
+            </button>
+          `;
+        }).join("")
+      : `<div class="variant-rail-empty">Cast ${escapeHtml(familyLabel)} to open four fast options.</div>`;
 
-    const popSheetControls = activeTab === "warhol"
-      ? `
-        <div class="variant-title">Pop Sheet Style</div>
-        <div class="theory-rail pop-sheet-style-rail">
-          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_POSTER ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="${POP_SHEET_STYLE_POSTER}">Poster Grid</button>
-          <button class="theory-btn${state.popSheetStyle === POP_SHEET_STYLE_SCREENPRINT ? " is-active" : ""}" type="button" data-action="set-pop-sheet-style" data-style="${POP_SHEET_STYLE_SCREENPRINT}">Screenprint</button>
-        </div>
-        <div class="variant-title">Pop Sheet</div>
-        <div class="theory-rail pop-sheet-rail">
-          <button class="theory-btn${state.popSheetLayout === "2x2" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="2x2">2x2</button>
-          <button class="theory-btn${state.popSheetLayout === "3x3" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="3x3">3x3</button>
-          <button class="theory-btn${state.popSheetLayout === "4x4" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="4x4">4x4</button>
-        </div>
-        <div class="variant-action-grid">
-          <button class="preset-btn" type="button" data-action="build-pop-sheet">Build Pop Sheet</button>
-        </div>
-      `
-      : "";
+    const gridAction = `
+      <div class="theory-rail pop-sheet-rail">
+        <button class="theory-btn${state.popSheetLayout === "1x3" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="1x3">1x3</button>
+        <button class="theory-btn${state.popSheetLayout === "2x2" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="2x2">2x2</button>
+        <button class="theory-btn${state.popSheetLayout === "3x3" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="3x3">3x3</button>
+        <button class="theory-btn${state.popSheetLayout === "4x4" ? " is-active" : ""}" type="button" data-action="set-pop-sheet" data-layout="4x4">4x4</button>
+      </div>
+      <div class="theory-rail pop-sheet-rail">
+        ${Object.entries(GRID_FRAME_TONES).map(([toneId, tone]) => `
+          <button class="theory-btn${state.gridFrameTone === toneId ? " is-active" : ""}" type="button" data-action="set-grid-frame-tone" data-frame-tone="${toneId}">${escapeHtml(tone.label)}</button>
+        `).join("")}
+      </div>
+      <div class="variant-action-grid">
+        <button class="preset-btn" type="button" data-action="build-grid">Build Grid</button>
+        ${activeTab === "warhol" ? `<button class="preset-btn" type="button" data-action="build-pop-sheet">Pop Posterize</button>` : ""}
+      </div>
+    `;
 
     els.presetList.innerHTML = `
       <div class="variant-panel no-field-panel">
         <div class="mini-note no-field-guidance">${escapeHtml(familyHint)}</div>
-        <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift · ${toneTarget} tones</div>
-        <div class="variant-action-grid">
+        <div class="role-pair-readout">Role pair · ${escapeHtml(world.background)} → ${escapeHtml(world.figure)} · ${world.roleStep} lift</div>
+        <div class="variant-action-grid variant-action-grid--rail">
           <button class="preset-btn" type="button" data-action="render-core" data-family="${activeTab}">Cast ${escapeHtml(familyLabel)}</button>
+          <button class="preset-btn" type="button" data-action="rail-next" data-family="${activeTab}">Mutate</button>
         </div>
-        ${popSheetControls}
-        <div class="variant-title">${escapeHtml(current?.name || "Original-source render ready")}</div>
+        ${gridAction}
+        <div class="variant-title">${escapeHtml(current?.name || "Live canvas mutation ready")}</div>
         <div class="variant-chips">
           ${variantChipsMarkup(current)}
         </div>
+        <div class="variant-title">Quick Picks</div>
+        <div class="variant-rail-grid">
+          ${railCards}
+        </div>
       </div>
     `;
-    renderFamilyModifierPanel();
   }
 
   function renderPresetList() {
@@ -2568,20 +3259,38 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       return;
     }
     if (btn.dataset.action === "build-pop-sheet") {
-      applyPopSheet(state.popSheetLayout, state.popSheetStyle);
+      applyPopSheet(state.popSheetLayout || "4x4", POP_SHEET_STYLE_POSTER);
+      return;
+    }
+    if (btn.dataset.action === "build-grid") {
+      applyVariantGrid(state.popSheetLayout || "4x4", { family: activeCreativeFamily() });
       return;
     }
     if (btn.dataset.action === "set-pop-sheet") {
-      state.popSheetLayout = btn.dataset.layout || "2x2";
+      state.popSheetLayout = btn.dataset.layout || "4x4";
       renderVariantPanel();
-      setTopbarStatus(`Pop Sheet ${state.popSheetLayout} armed`);
+      setTopbarStatus(`Grid layout ${state.popSheetLayout} armed`);
+      persistSession();
       return;
     }
-    if (btn.dataset.action === "set-pop-sheet-style") {
-      const nextStyle = normalizePopSheetStyle(btn.dataset.style);
-      state.popSheetStyle = nextStyle;
+    if (btn.dataset.action === "set-grid-frame-tone") {
+      const nextTone = btn.dataset.frameTone || "cream";
+      state.gridFrameTone = GRID_FRAME_TONES[nextTone] ? nextTone : "cream";
       renderVariantPanel();
-      setTopbarStatus(`Pop Sheet style · ${popSheetStyleLabel(nextStyle)}`);
+      setTopbarStatus(`Grid frame ${GRID_FRAME_TONES[state.gridFrameTone].label} armed`);
+      persistSession();
+      return;
+    }
+    if (btn.dataset.action === "rail-next") {
+      const family = btn.dataset.family || activeCreativeFamily();
+      const rail = railStateForFamily(family);
+      loadVariantFromRail(family, rail.pageIndex + 1, 0, { statusPrefix: "Mutate" });
+      return;
+    }
+    if (btn.dataset.action === "load-rail-variant") {
+      const family = btn.dataset.family || activeCreativeFamily();
+      loadVariantFromRail(family, Number(btn.dataset.page) || 0, Number(btn.dataset.slot) || 0, { statusPrefix: "Cast" });
+      return;
     }
   });
 
@@ -2607,6 +3316,7 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
         ...state.familyModifiers,
         [family]: next,
       };
+      invalidateVariantRailState(family);
       scheduleVariantPanelRender();
     }
   });
@@ -2649,13 +3359,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
   function updateExportButtons() {
     const ok = state.selected != null;
     const grain = canvas.getDisplayGrain();
+    const hasNoiseMask = canvas.getNoiseMaskCoordinates().length > 0;
     els.exportPng.disabled = !ok;
-    els.exportGif.disabled = !ok || !grain.enabled || !(grain.amount > 0);
+    els.exportGif.disabled = !ok || !grain.enabled || !(grain.amount > 0) || !hasNoiseMask;
     if (els.saveGalleryPng) {
       els.saveGalleryPng.disabled = !ok || state.gallerySaving;
     }
     if (els.saveGalleryGif) {
-      els.saveGalleryGif.disabled = !ok || state.gallerySaving || !grain.enabled || !(grain.amount > 0);
+      els.saveGalleryGif.disabled = !ok || state.gallerySaving || !grain.enabled || !(grain.amount > 0) || !hasNoiseMask;
     }
     els.exportReset.disabled = !ok;
   }
@@ -2737,15 +3448,15 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
     try {
       const fileName = `nopunk-${state.selected.id}-no-studio-noise.gif`;
-      if (state.noiseGifAvailable) {
+      if (state.noiseGifAvailable && !canvas.hasSheet()) {
         try {
           const imageData = canvas.exportImageData();
           const rgba24B64 = encodeRgba24B64(imageData.data);
-          const occupiedPixels = Array.from(state.originalOccupied || canvas.getOccupied());
+          const noiseMask = canvas.getNoiseMaskCoordinates();
           const payload = await renderNoStudioNoiseGif({
             tokenId: state.selected.id,
             rgba24B64,
-            occupiedPixels,
+            noiseMask,
             grain,
           });
           downloadUrl(`${payload.output.gifUrl}?download=1`, fileName);
@@ -2802,6 +3513,24 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     refreshGallery();
   });
 
+  els.galleryList?.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-gallery-vote]");
+    if (!button) return;
+    event.preventDefault();
+    const id = String(button.getAttribute("data-gallery-vote") || "");
+    if (!id) return;
+    try {
+      const payload = await voteNoStudioGallery(id);
+      if (!payload?.item) return;
+      state.galleryItems = state.galleryItems.map((entry) => String(entry?.id || "") === String(payload.item.id)
+        ? { ...entry, ...payload.item }
+        : entry);
+      renderGallery();
+    } catch (error) {
+      setTopbarStatus(error.message || "Vote failed");
+    }
+  });
+
   // ── Sidebar toggle / dock drawer ──────────────────────────────
 
   els.sidebarToggle?.addEventListener("click", () => setSidebarOpen(!els.sidebar.classList.contains("is-open")));
@@ -2814,12 +3543,49 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
   const picker = mountPunkPicker(els.pickerHost, {
     title: "Source Drawer",
-    subtitle: "Load a NoPunk, then reduce until the traits speak",
+    subtitle: "Load a NoPunk, then build from a clean 24x24 start",
     placeholder: "Search #7804, alien, pipe...",
     autoSelectFirst: true,
     maxResults: 12,
     getSelectedIds: () => (state.selected ? [state.selected.id] : []),
     onPick: (item) => { setSelectedPunk(item); picker.refreshSelection(); },
+  });
+
+  syncRestoreSessionButton();
+
+  els.restoreLastSession?.addEventListener("click", async () => {
+    const saved = restoreCanvasSession;
+    if (!isRestorableCanvasSession(saved)) return;
+    if (state.selected && Number(saved.selectedTokenId) === Number(state.selected.id) && state.originalImageData) {
+      canvas.loadSessionState(saved);
+      renderNoiseTargetRail();
+      updatePaletteGrid();
+      setTopbarStatus(`Restored last session on #${state.selected.id}`);
+      return;
+    }
+    if (saved.selectedTokenId == null) {
+      setTopbarStatus("Saved session has no source token");
+      return;
+    }
+    restoreSessionArmed = true;
+    pendingCanvasSession = saved;
+    try {
+      const payload = await searchPunks(String(saved.selectedTokenId), 1);
+      if (state.disposed) return;
+      const item = (payload.items || []).find((entry) => Number(entry.id) === Number(saved.selectedTokenId));
+      if (!item) {
+        restoreSessionArmed = false;
+        pendingCanvasSession = null;
+        setTopbarStatus("Saved source punk was not found");
+        return;
+      }
+      await setSelectedPunk(item);
+      picker.refreshSelection();
+    } catch (error) {
+      restoreSessionArmed = false;
+      pendingCanvasSession = null;
+      setTopbarStatus(error.message || "Restore failed");
+    }
   });
 
   async function setSelectedPunk(item) {
@@ -2833,7 +3599,13 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.sourceRoleByHex = new Map();
     state.noMinimalPreviewPair = null;
     canvas.clearDisplayGrain();
-    state.variantByFamily = { mono: null, noir: null, warhol: null, acid: null, pastel: null };
+    canvas.setShowNoiseMask(state.showNoiseMask);
+    canvas.setSourceOverlayVisible(state.sourceOverlayVisible);
+    canvas.setPaintTarget(state.activePaintTarget);
+    state.variantByFamily = { mono: null, chrome: null, warhol: null, acid: null, pastel: null };
+    state.variantRailByFamily = createInitialVariantRailByFamily();
+    state.activeStudioVariant = null;
+    state.activeStudioProvenance = null;
     state.outputSignatures.clear();
     state.outputSignatureOrder = [];
     state.popSheetBuildNonce = 0;
@@ -2859,8 +3631,17 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       state.originalRoleMap = classifyPixelRoles(imageData);
       state.originalOccupied = getOccupiedPixels(imageData);
       canvas.loadImageData(imageData);
+      const restoredCanvasSession = restoreSessionArmed
+        && pendingCanvasSession
+        && Number(pendingCanvasSession.selectedTokenId) === Number(state.selected.id);
+      if (restoredCanvasSession) {
+        canvas.loadSessionState(pendingCanvasSession);
+        pendingCanvasSession = null;
+        restoreSessionArmed = false;
+        setTopbarStatus(`Restored last session on #${state.selected.id}`);
+      }
       state.sourceClassifiedPalette = canvas.getClassifiedPalette().map((entry) => ({ ...entry }));
-      state.sourcePaletteHexes = canvas.getCurrentPalette().slice();
+      state.sourcePaletteHexes = canvas.getOriginalPalette().slice();
       state.sourceRoleByHex = new Map(
         (state.sourceClassifiedPalette || []).map((entry) => [String(entry.hex || "").toUpperCase(), String(entry.role || "body")]),
       );
@@ -2877,12 +3658,18 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       if (!validSourceHexes.has(String(state.curationSourceHex || "").toUpperCase())) {
         state.curationSourceHex = null;
       }
+      if (!restoredCanvasSession && state.startMode !== "full") {
+        applyStartMode(state.startMode, { quiet: true });
+      }
       refreshNoMinimalPreviewPair();
       renderHeroRolePair();
+      renderNoiseTargetRail();
       updatePaletteGrid();
       updateExportButtons();
       setServerStatus(`#${state.selected.id} loaded`, "ready");
-      setTopbarStatus(`#${state.selected.id} loaded · 24x24 truth`);
+      if (!restoredCanvasSession) {
+        setTopbarStatus(`#${state.selected.id} loaded · clean 24x24 canvas`);
+      }
       if (mobileDockQuery.matches) setSidebarOpen(false);
       pulseStudio("load");
     } catch (error) {
@@ -2894,11 +3681,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
 
   const savedSession = restoreSession();
   if (savedSession) {
-    if (savedSession.activePresetTab) state.activePresetTab = savedSession.activePresetTab;
+    if (savedSession.activePresetTab) {
+      state.activePresetTab = savedSession.activePresetTab === "noir" ? "chrome" : savedSession.activePresetTab;
+    }
     if (savedSession.activeColor) state.activeColor = savedSession.activeColor;
     if (savedSession.activeColorHex) state.activeColorHex = savedSession.activeColorHex;
     if (savedSession.noMinimalDeltaMode) state.noMinimalDeltaMode = savedSession.noMinimalDeltaMode;
     if (savedSession.useActiveBg != null) state.useActiveBg = savedSession.useActiveBg;
+    if (savedSession.activePaintTarget) state.activePaintTarget = savedSession.activePaintTarget;
     if (savedSession.globalModifiers && typeof savedSession.globalModifiers === "object") {
       state.globalModifiers = {
         ...state.globalModifiers,
@@ -2906,14 +3696,25 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       };
     }
     if (savedSession.familyModifiers && typeof savedSession.familyModifiers === "object") {
+      const nextFamilyModifiers = { ...savedSession.familyModifiers };
+      if (nextFamilyModifiers.noir && !nextFamilyModifiers.chrome) {
+        nextFamilyModifiers.chrome = {
+          shimmer: Number(nextFamilyModifiers.noir.shadowDepth) || 70,
+          polish: 62,
+        };
+      }
       state.familyModifiers = {
         ...state.familyModifiers,
-        ...savedSession.familyModifiers,
+        ...nextFamilyModifiers,
       };
     }
-    state.activeNoiseTarget = state.globalModifiers.grainTarget || state.activeNoiseTarget;
     state.noiseAmount = Number(state.globalModifiers.grainAmount ?? state.noiseAmount) || state.noiseAmount;
+    state.showNoiseMask = Boolean(savedSession.showNoiseMask);
+    state.sourceOverlayVisible = Boolean(savedSession.sourceOverlayVisible);
     if (savedSession.popSheetLayout) state.popSheetLayout = savedSession.popSheetLayout;
+    if (savedSession.gridFrameTone && GRID_FRAME_TONES[savedSession.gridFrameTone]) {
+      state.gridFrameTone = savedSession.gridFrameTone;
+    }
     if (savedSession.popSheetStyle === "warhol" || savedSession.popSheetStyle === "screenprint" || savedSession.popSheetStyle === POP_SHEET_STYLE_POSTER) {
       state.popSheetStyle = normalizePopSheetStyle(savedSession.popSheetStyle);
     } else if (savedSession.popSheetStyle === "serial") {
@@ -2932,6 +3733,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       }
       state.curatedPaletteMap = nextMap;
     }
+    if (savedSession.variantRailLocks && typeof savedSession.variantRailLocks === "object") {
+      state.variantRailLocks = {
+        ...state.variantRailLocks,
+        background: Boolean(savedSession.variantRailLocks.background),
+        accentBias: Boolean(savedSession.variantRailLocks.accentBias),
+        curatedMap: Boolean(savedSession.variantRailLocks.curatedMap),
+      };
+    }
     if (/^#[0-9A-F]{6}$/.test(String(savedSession.curationSourceHex || "").toUpperCase())) {
       state.curationSourceHex = String(savedSession.curationSourceHex).toUpperCase();
     }
@@ -2939,22 +3748,20 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     syncGlobalModifierUI();
     syncActiveBgToggle();
     renderNoMinimalModeRail();
+    renderPaintTargetRail();
     renderNoiseTargetRail();
+    renderStartModeRail();
+    syncMaskUi();
+    canvas.setPaintTarget(state.activePaintTarget);
+    canvas.setShowNoiseMask(state.showNoiseMask);
+    canvas.setSourceOverlayVisible(state.sourceOverlayVisible);
     setActivePresetTab(state.activePresetTab);
     if (els.noiseAmount) els.noiseAmount.value = String(state.noiseAmount);
     if (els.noiseAmountValue) els.noiseAmountValue.textContent = `${state.noiseAmount}%`;
     if (els.gallerySignature) els.gallerySignature.value = state.gallerySignature;
-    if (savedSession.selectedId != null) {
-      searchPunks(String(savedSession.selectedId), 1)
-        .then((payload) => {
-          if (state.disposed) return;
-          const item = (payload.items || []).find((i) => Number(i.id) === Number(savedSession.selectedId));
-          if (item) {
-            setSelectedPunk(item);
-            picker.refreshSelection();
-          }
-        })
-        .catch(() => {});
+    if (isRestorableCanvasSession(savedSession)) {
+      restoreCanvasSession = savedSession;
+      syncRestoreSessionButton();
     }
   }
 
@@ -2965,11 +3772,14 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
       if (state.disposed) return;
       state.noiseGifAvailable = cfg.noiseGifAvailable !== false;
       state.noGalleryAvailable = cfg.noGalleryAvailable !== false;
+      state.globalGalleryEnabled = cfg.globalGalleryEnabled === true;
       if (!state.noiseGifAvailable) {
         els.exportGif.title = "Animated grain GIF will render in-browser on live deploys.";
       }
-      renderGallery();
-      refreshGallery({ silent: true });
+      if (els.galleryList) {
+        renderGallery();
+        refreshGallery({ silent: true });
+      }
       updateExportButtons();
       setTopbarStatus("Studio mode · traits speak in relief");
     })

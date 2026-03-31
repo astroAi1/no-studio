@@ -25,39 +25,13 @@ trap cleanup EXIT
 echo "Opening ${URL}"
 ab open "${URL}"
 ab wait --text "NO-STUDIO"
-ab wait --text "No-Minimalism"
+ab wait --text "24×24"
 
-echo "Selecting #7804"
-ab find placeholder "Search #7804, alien, pipe..." fill "#7804"
-ab wait 300
-ab find text "No-Punk #7804" click
-ab wait 400
-
-echo "Toggling active background mode and applying No-Minimalism"
-ab find text "Use Active Color As BG" click
+echo "Loading token #7804"
+ab find placeholder "token id" fill "7804"
 ab wait 150
-ab find text "No-Minimalism" click
-ab wait 300
-
-echo "Generating Noir and Pop from original-source logic"
-ab find text "Noir" click
-ab wait 120
-ab find text "Render Noir" click
-ab wait 250
-ab find text "Pop" click
-ab wait 120
-ab find text "Render Pop" click
-ab wait 250
-
-echo "Running background-reactive Bayer dither"
-ab find text "Dither" click
-ab wait 120
-ab find text "Bayer" click
-ab wait 100
-ab find text "Build Theory From Active" click
-ab wait 120
-ab find text "Run Pattern" click
-ab wait 300
+ab find text "#7804" click
+ab wait 600
 
 echo "Capturing final state"
 ab screenshot "${SCREENSHOT_PATH}"
