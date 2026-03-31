@@ -227,6 +227,87 @@ const GRID_HARMONY_PROFILES = {
   acid: { hueSpan: 16, satMul: [0.96, 1.12], lightMul: [0.86, 1.04], bgScale: 0.44 },
   pastel: { hueSpan: 10, satMul: [0.86, 0.98], lightMul: [0.98, 1.1], bgScale: 0.3 },
 };
+const GRID_PANEL_STYLES = [
+  {
+    id: "hero",
+    hueBias: 0,
+    accentHueBias: 8,
+    satMul: [0.94, 1.04],
+    lightMul: [0.95, 1.05],
+    bgBlend: 0.18,
+    bgSatMul: 1.02,
+    bgLightMul: 0.98,
+    flatMix: 0.03,
+    accentLift: 0.03,
+  },
+  {
+    id: "split",
+    hueBias: 34,
+    accentHueBias: 52,
+    satMul: [0.96, 1.1],
+    lightMul: [0.9, 1.02],
+    bgBlend: 0.36,
+    bgSatMul: 1.08,
+    bgLightMul: 0.94,
+    flatMix: 0.06,
+    accentLift: 0.04,
+  },
+  {
+    id: "flip",
+    hueBias: -46,
+    accentHueBias: -70,
+    satMul: [0.92, 1.1],
+    lightMul: [0.88, 1.02],
+    bgBlend: 0.44,
+    bgSatMul: 1.1,
+    bgLightMul: 0.92,
+    flatMix: 0.08,
+    accentLift: 0.05,
+  },
+  {
+    id: "echo",
+    hueBias: 18,
+    accentHueBias: 26,
+    satMul: [0.9, 1.03],
+    lightMul: [0.98, 1.1],
+    bgBlend: 0.26,
+    bgSatMul: 0.98,
+    bgLightMul: 1.06,
+    flatMix: 0.02,
+    accentLift: 0.03,
+  },
+  {
+    id: "shadow",
+    hueBias: -18,
+    accentHueBias: -32,
+    satMul: [0.88, 1],
+    lightMul: [0.82, 0.98],
+    bgBlend: 0.32,
+    bgSatMul: 1,
+    bgLightMul: 0.88,
+    flatMix: 0.1,
+    accentLift: -0.01,
+  },
+  {
+    id: "duotone",
+    hueBias: 72,
+    accentHueBias: 104,
+    satMul: [0.98, 1.14],
+    lightMul: [0.9, 1.02],
+    bgBlend: 0.52,
+    bgSatMul: 1.12,
+    bgLightMul: 0.94,
+    flatMix: 0.14,
+    accentLift: 0.06,
+  },
+];
+const FAMILY_GRID_STYLE_ORDERS = {
+  mono: [0, 3, 4, 1, 2, 5],
+  chrome: [0, 1, 3, 5, 2, 4],
+  warhol: [5, 1, 2, 0, 3, 4],
+  acid: [2, 5, 4, 1, 0, 3],
+  pastel: [3, 0, 1, 4, 2, 5],
+};
 const GRID_FRAME_TONES = {
   black: {
     label: "Black",
@@ -2346,49 +2427,143 @@ export function mountNoStudioTool(root, shellApi = {}) {
     const progress = panelCount > 1 ? (panelIndex / Math.max(1, panelCount - 1)) : 0.5;
     const centered = progress - 0.5;
     const wave = Math.sin((panelIndex + 1) * 1.61803398875);
-    return { progress, centered, wave };
+    const orbit = Math.cos((panelIndex + 1) * 0.9189385332);
+    const ripple = Math.sin(((panelIndex + 1) * 0.72) + (panelCount * 0.11));
+    return { progress, centered, wave, orbit, ripple };
   }
 
-  function buildHarmonicGridVariant({
+  function pickGridPanelStyle(family, panelIndex, attempt = 0, sheetNonce = 0) {
+    const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
+    const order = FAMILY_GRID_STYLE_ORDERS[safeFamily] || FAMILY_GRID_STYLE_ORDERS.chrome;
+    const styleIndex = order[(panelIndex + attempt + sheetNonce) % order.length];
+    return GRID_PANEL_STYLES[styleIndex] || GRID_PANEL_STYLES[0];
+  }
+
+  function computeGridPanelBackground({
     family,
+    baseBackgroundHex,
     panelIndex,
     panelCount,
+    attempt = 0,
+    sheetNonce = 0,
+    style,
     posterize = false,
   }) {
     const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
     const profile = GRID_HARMONY_PROFILES[safeFamily] || GRID_HARMONY_PROFILES.chrome;
-    const classified = currentCreativeClassification();
-    const basePair = canvas.getGlobalRolePair();
-    const { centered, wave } = gridHarmonySignal(panelIndex, panelCount);
-    const hueShift = (centered * profile.hueSpan * 1.35) + (wave * profile.hueSpan * 0.35);
-    const satMix = clampUnit(0.5 + (centered * 0.9) + (wave * 0.18));
-    const lightMix = clampUnit(0.5 + (centered * 0.56) - (wave * 0.14));
-    const satMul = lerp(profile.satMul[0], profile.satMul[1], satMix) * (posterize ? 1.04 : 1);
-    const lightMul = lerp(profile.lightMul[0], profile.lightMul[1], lightMix) * (posterize ? 0.99 : 1);
-    const backgroundHex = mixHex(
-      basePair.background,
-      shiftHexHue(basePair.background, hueShift * profile.bgScale * (posterize ? 1.15 : 1), satMul, lightMul),
-      posterize ? 0.82 : 0.58,
+    const panelStyle = style || pickGridPanelStyle(safeFamily, panelIndex, attempt, sheetNonce);
+    const { centered, wave, orbit, ripple } = gridHarmonySignal(panelIndex + (attempt * 0.37), panelCount + Math.max(0, sheetNonce));
+    const familySpan = profile.hueSpan * (
+      safeFamily === "warhol" ? 2.9
+      : safeFamily === "acid" ? 2.35
+      : safeFamily === "chrome" ? 1.9
+      : safeFamily === "pastel" ? 1.3
+      : 1.4
     );
-    const roles = canvas.enforceBgOutlineRule(backgroundHex);
-    const mapping = {};
+    const hueShift = (
+      panelStyle.hueBias
+      + (centered * familySpan)
+      + (wave * familySpan * 0.72)
+      + (orbit * familySpan * 0.46)
+      + (ripple * familySpan * 0.28)
+      + (attempt * 9)
+    );
+    const satMul = lerp(panelStyle.satMul[0], panelStyle.satMul[1], clampUnit(0.5 + (wave * 0.5))) * panelStyle.bgSatMul;
+    const lightMul = lerp(panelStyle.lightMul[0], panelStyle.lightMul[1], clampUnit(0.5 - (centered * 0.5))) * panelStyle.bgLightMul;
+    let shifted = shiftHexHue(
+      baseBackgroundHex,
+      hueShift * profile.bgScale,
+      satMul,
+      lightMul,
+    );
 
-    for (const entry of classified) {
+    if (safeFamily === "warhol") {
+      const bank = POP_POSTER_BACKGROUNDS[(panelIndex + attempt + sheetNonce) % POP_POSTER_BACKGROUNDS.length] || shifted;
+      shifted = mixHex(shifted, bank, posterize ? 0.58 : 0.42);
+    } else if (safeFamily === "acid") {
+      shifted = mixHex(shifted, shiftHexHue(baseBackgroundHex, hueShift + 96, 1.16, 0.84), 0.26 + (Math.abs(orbit) * 0.12));
+    } else if (safeFamily === "chrome") {
+      shifted = mixHex(shifted, "#C8D6E5", 0.14 + (Math.abs(wave) * 0.08));
+    } else if (safeFamily === "pastel") {
+      shifted = mixHex(shifted, "#F4EFEA", 0.26 + (Math.max(0, centered) * 0.12));
+    } else if (safeFamily === "mono") {
+      shifted = mixHex(shifted, baseBackgroundHex, 0.34);
+    }
+
+    return canvas.enforceBgOutlineRule(shifted).background;
+  }
+
+  function tuneGridPanelResult(result, classified, {
+    family,
+    panelIndex,
+    panelCount,
+    attempt = 0,
+    sheetNonce = 0,
+    style = null,
+    posterize = false,
+  } = {}) {
+    const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
+    const panelStyle = style || pickGridPanelStyle(safeFamily, panelIndex, attempt, sheetNonce);
+    const entries = Array.isArray(classified) ? classified : [];
+    const mapping = { ...(result?.mapping || {}) };
+    const baseRoles = result?.roles || {};
+    const roles = canvas.enforceBgOutlineRule(computeGridPanelBackground({
+      family: safeFamily,
+      baseBackgroundHex: baseRoles.background || canvas.getGlobalRolePair().background,
+      panelIndex,
+      panelCount,
+      attempt,
+      sheetNonce,
+      style: panelStyle,
+      posterize,
+    }));
+    const forbidden = new Set(entries.map((entry) => String(entry?.hex || "").toUpperCase()));
+    forbidden.add(BRAND_ROLE_BG);
+    forbidden.add(BRAND_ROLE_FG);
+    const used = new Set([roles.background, roles.outline]);
+    const floor = hexLuma(roles.outline || BRAND_ROLE_FG) + 2;
+    const profile = GRID_HARMONY_PROFILES[safeFamily] || GRID_HARMONY_PROFILES.chrome;
+    const { centered, wave, orbit, ripple } = gridHarmonySignal(panelIndex + (sheetNonce * 0.21), panelCount);
+    const mainShift = (
+      panelStyle.hueBias
+      + (centered * profile.hueSpan * 1.9)
+      + (wave * profile.hueSpan * 0.82)
+      + (orbit * profile.hueSpan * 0.56)
+      + (ripple * profile.hueSpan * 0.24)
+      + (attempt * 7)
+    );
+
+    for (const entry of entries) {
       const sourceHex = String(entry?.hex || "").toUpperCase();
-      if (!/^#[0-9A-F]{6}$/.test(sourceHex)) continue;
-      if (entry.role === "background" || entry.role === "outline") continue;
-      const roleScale = entry.role === "accent" ? 1.16 : entry.role === "neutral" ? 0.72 : 0.92;
-      const roleSatMul = entry.role === "accent" ? satMul * 1.04 : entry.role === "neutral" ? satMul * 0.95 : satMul;
-      const roleLightMul = entry.role === "accent" && posterize ? lightMul * 1.03 : lightMul;
-      let candidate = shiftHexHue(sourceHex, hueShift * roleScale, roleSatMul, roleLightMul);
-      candidate = mixHex(sourceHex, candidate, posterize ? 0.76 : 0.54);
+      const role = entry?.role || "body";
+      if (!/^#[0-9A-F]{6}$/.test(sourceHex) || role === "background" || role === "outline") continue;
+      const baseHex = String(mapping[sourceHex] || sourceHex).toUpperCase();
+      const roleHueShift = (
+        mainShift * (role === "accent" ? 1.28 : role === "neutral" ? 0.76 : 1)
+        + (role === "accent" ? panelStyle.accentHueBias : panelStyle.hueBias * 0.16)
+      );
+      const roleSatMul = lerp(panelStyle.satMul[0], panelStyle.satMul[1], clampUnit(0.5 + (orbit * 0.5)))
+        * (role === "accent" ? 1.08 : role === "neutral" ? 0.96 : 1);
+      const roleLightMul = lerp(panelStyle.lightMul[0], panelStyle.lightMul[1], clampUnit(0.5 - (centered * 0.5)))
+        * (role === "accent" ? 1 + panelStyle.accentLift : 1);
+      let candidate = shiftHexHue(baseHex, roleHueShift, roleSatMul, roleLightMul);
+      if (panelStyle.flatMix > 0) {
+        candidate = mixHex(
+          candidate,
+          role === "accent" ? roles.outline : roles.background,
+          role === "accent" ? panelStyle.flatMix * 0.34 : panelStyle.flatMix,
+        );
+      }
+      if (posterize && role === "accent") {
+        candidate = mixHex(candidate, "#FFFFFF", 0.08 + (panelStyle.accentLift * 0.4));
+      }
       if (candidate === roles.background) {
-        candidate = mixHex(candidate, roles.outline, 0.16);
+        candidate = mixHex(candidate, roles.outline, 0.18);
       }
       if (candidate === roles.outline) {
-        candidate = mixHex(candidate, "#FFFFFF", 0.1);
+        candidate = mixHex(candidate, "#FFFFFF", 0.12);
       }
-      mapping[sourceHex] = candidate;
+      mapping[sourceHex] = ensureDistinctHex(candidate, used, { floor, forbidden });
     }
 
     const palette = normalizeHexPalette([
@@ -2398,11 +2573,8 @@ export function mountNoStudioTool(root, shellApi = {}) {
     ]);
 
     return {
+      ...result,
       family: safeFamily,
-      id: `grid-${safeFamily}-${panelCount}-${panelIndex}-${posterize ? "poster" : "harmony"}`,
-      name: posterize
-        ? `${FAMILY_LABELS[safeFamily] || "Studio"} Poster ${panelIndex + 1}`
-        : `${FAMILY_LABELS[safeFamily] || "Studio"} Harmony ${panelIndex + 1}`,
       mapping,
       roles,
       rolePair: {
@@ -2413,11 +2585,61 @@ export function mountNoStudioTool(root, shellApi = {}) {
       },
       palette,
       paletteSignature: makePaletteSignature(palette),
-      sourcePaletteSignature: currentSourcePaletteSignature(),
-      score: posterize ? 89.5 : 91.5,
       ui: {
-        chips: [posterize ? "posterized" : "harmonic grid"],
+        chips: [panelStyle.id, posterize ? "poster series" : "grid series"],
       },
+    };
+  }
+
+  function buildHarmonicGridVariant({
+    family,
+    panelIndex,
+    panelCount,
+    posterize = false,
+    attempt = 0,
+    sheetNonce = 0,
+  }) {
+    const safeFamily = FAMILY_IDS.includes(family) ? family : activeCreativeFamily();
+    const classified = currentCreativeClassification();
+    const style = pickGridPanelStyle(safeFamily, panelIndex, attempt, sheetNonce);
+    const basePair = canvas.getGlobalRolePair();
+    const preset = createUniqueVariant(safeFamily, classified);
+    const backgroundHex = computeGridPanelBackground({
+      family: safeFamily,
+      baseBackgroundHex: basePair.background,
+      panelIndex,
+      panelCount,
+      attempt,
+      sheetNonce,
+      style,
+      posterize,
+    });
+    const seeded = buildFamilyResult(classified, safeFamily, {
+      preset,
+      backgroundHex,
+      traitPhase: ((panelIndex + 1) * 0.37) + (attempt * 0.23) + (sheetNonce * 0.11),
+      panelIndex: panelIndex + (attempt * panelCount) + (sheetNonce * panelCount * 3),
+      panelCount: Math.max(2, panelCount * 2),
+      popSheetStyle: posterize ? POP_SHEET_STYLE_POSTER : POP_SHEET_STYLE_SOFT,
+    });
+    const tuned = tuneGridPanelResult(seeded, classified, {
+      family: safeFamily,
+      panelIndex,
+      panelCount,
+      attempt,
+      sheetNonce,
+      style,
+      posterize,
+    });
+
+    return {
+      ...tuned,
+      id: `grid-${safeFamily}-${panelCount}-${panelIndex}-${sheetNonce}-${attempt}-${style.id}-${posterize ? "poster" : "series"}`,
+      name: posterize
+        ? `${FAMILY_LABELS[safeFamily] || "Studio"} Poster ${panelIndex + 1}`
+        : `${FAMILY_LABELS[safeFamily] || "Studio"} Grid ${panelIndex + 1}`,
+      sourcePaletteSignature: currentSourcePaletteSignature(),
+      score: posterize ? 92.5 : 93.5,
     };
   }
 
@@ -2703,25 +2925,75 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.popSheetBuildNonce = sheetNonce;
     const compositionState = canvas.exportCompositionState();
     const baseTile = canvas.exportCompositionImageData();
-    const variants = Array.from({ length: Math.max(0, panelCount - 1) }, (_, index) => (
-      buildHarmonicGridVariant({
+    const usedRolePairs = new Set();
+    const usedPaletteSignatures = new Set();
+    const usedPanelSignatures = new Set();
+    const usedBackgrounds = [];
+    const minimumBgDistance = family === "pastel" ? 0.045 : family === "mono" ? 0.038 : 0.055;
+
+    function acceptGridPanel(result, tile, panelIndex, attempt) {
+      const rolePair = panelRolePairSignature(result);
+      const paletteSig = makePanelPaletteSignature(result);
+      const visualSig = panelVisualSignature(result, {
+        style: `grid-${family}`,
+        layout: layoutId,
+      });
+      const panelSig = panelSignature(result, {
+        style: `grid-${family}`,
+        layout: layoutId,
+        panelSeed: panelIndex + (attempt * panelCount) + (sheetNonce * 997),
+      });
+      const backgroundHex = String(result?.roles?.background || "").toUpperCase();
+      if (!rolePair || !paletteSig || !visualSig || !panelSig || !/^#[0-9A-F]{6}$/.test(backgroundHex)) return false;
+      if (!tileKeepsArtworkVisible(tile, compositionState.roleGrid)) return false;
+      if (usedRolePairs.has(rolePair)) return false;
+      if (usedPaletteSignatures.has(paletteSig)) return false;
+      if (usedPanelSignatures.has(panelSig)) return false;
+      if (!isBackgroundSeparated(backgroundHex, usedBackgrounds, minimumBgDistance)) return false;
+      usedRolePairs.add(rolePair);
+      usedPaletteSignatures.add(paletteSig);
+      usedPanelSignatures.add(panelSig);
+      usedBackgrounds.push(backgroundHex);
+      return true;
+    }
+
+    function buildGridPanel(panelIndex) {
+      const maxAttempts = 12;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const variant = buildHarmonicGridVariant({
+          family,
+          panelIndex,
+          panelCount,
+          attempt,
+          sheetNonce,
+        });
+        const tile = canvas.buildMappedImageData(variant.mapping, variant.roles);
+        if (!acceptGridPanel(variant, tile, panelIndex, attempt)) continue;
+        return {
+          variant,
+          tile,
+        };
+      }
+
+      const fallback = buildHarmonicGridVariant({
         family,
-        panelIndex: index + 1,
+        panelIndex,
         panelCount,
-      })
-    ));
-
-    const tiles = [
-      baseTile,
-    ];
-    for (const variant of variants) {
-      const tile = canvas.buildMappedImageData(variant.mapping, variant.roles);
-      tiles.push(tileKeepsArtworkVisible(tile, compositionState.roleGrid) ? tile : cloneImageDataLocal(baseTile));
+        attempt: 99 + panelIndex,
+        sheetNonce,
+      });
+      const fallbackTile = canvas.buildMappedImageData(fallback.mapping, fallback.roles);
+      return {
+        variant: fallback,
+        tile: tileKeepsArtworkVisible(fallbackTile, compositionState.roleGrid)
+          ? fallbackTile
+          : cloneImageDataLocal(baseTile),
+      };
     }
 
-    while (tiles.length < panelCount) {
-      tiles.push(cloneImageDataLocal(baseTile));
-    }
+    const panelResults = Array.from({ length: panelCount }, (_, panelIndex) => buildGridPanel(panelIndex));
+    const variants = panelResults.map((entry) => entry.variant).filter(Boolean);
+    const tiles = panelResults.map((entry) => entry.tile || cloneImageDataLocal(baseTile));
 
     if (variants[0]) {
       state.variantByFamily[family] = variants[0];
@@ -2742,11 +3014,13 @@ function applyScreenprintInkMask(baseHex, panelRoles, x, y, panelIndex) {
     state.noFieldLastFamily = family;
     state.isSheetMode = true;
     state.lastReductionMode = "grid";
-    state.lastPopSheetPanelSignatures = variants.map((variant) => String(variant?.paletteSignature || variant?.id || ""));
+    state.lastPopSheetPanelSignatures = variants.map((variant) => (
+      panelVisualSignature(variant, { style: `grid-${family}`, layout: layoutId })
+    ));
     canvas.setSheetTiles(tiles, cols, rows, currentGridFrameStyle());
     renderVariantPanel();
     updatePaletteGrid();
-    setTopbarStatus(`${familyLabel} grid · ${label} · live canvas variants`);
+    setTopbarStatus(`${familyLabel} grid · ${label} · unique live canvas series`);
     pulseStudio("variant");
   }
 
